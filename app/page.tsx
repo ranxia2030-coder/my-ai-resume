@@ -72,6 +72,19 @@ type AnalyzeResponse = {
   error?: string;
 };
 
+type ParseResponse = {
+  text?: string;
+  error?: string;
+};
+
+type FormValues = {
+  resumeText: string;
+  jdText: string;
+  targetCompany: string;
+  targetRole: string;
+  answers: Record<string, string>;
+};
+
 const sampleResume = `张明
 手机号：138 0000 0000 | 邮箱：zhangming@example.com | 上海
 
@@ -368,21 +381,19 @@ async function downloadDocx(resumeText: string) {
 
 export default function Home() {
   const [stage, setStage] = useState<Stage>("input");
-  const [targetCompany, setTargetCompany] = useState("深蓝智能科技");
-  const [targetRole, setTargetRole] = useState("AI 产品经理");
-  const [resumeText, setResumeText] = useState(sampleResume);
-  const [jdText, setJdText] = useState(sampleJd);
-  const [fileName, setFileName] = useState("zhangming_resume.pdf");
+  const [targetCompany, setTargetCompany] = useState("");
+  const [targetRole, setTargetRole] = useState("");
+  const [resumeText, setResumeText] = useState("");
+  const [jdText, setJdText] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [jdFileName, setJdFileName] = useState("");
+  const [resumeParseStatus, setResumeParseStatus] = useState("支持 PDF、DOCX、TXT；扫描版图片请先复制文字后粘贴。");
+  const [jdParseStatus, setJdParseStatus] = useState("支持 PDF、DOCX、TXT；招聘截图和链接请先复制 JD 文字。");
+  const [isParsingResume, setIsParsingResume] = useState(false);
+  const [isParsingJd, setIsParsingJd] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [analysis, setAnalysis] = useState<Analysis>(() => buildAnalysis(sampleResume, sampleJd));
-  const [optimizedResume, setOptimizedResume] = useState(() =>
-    buildOptimizedResume({
-      targetRole: "AI 产品经理",
-      targetCompany: "深蓝智能科技",
-      answers: { role: "负责模块" },
-      analysis: buildAnalysis(sampleResume, sampleJd),
-    }),
-  );
+  const [optimizedResume, setOptimizedResume] = useState("");
   const [resultNotice, setResultNotice] = useState("当前还未调用模型。点击左侧按钮后会优先请求 DeepSeek，失败时使用本地兜底。");
   const [resultSource, setResultSource] = useState<"pending" | "ai" | "fallback">("pending");
   const [answers, setAnswers] = useState<Record<string, string>>({
@@ -390,19 +401,93 @@ export default function Home() {
   });
   const [copied, setCopied] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
+  const [saved, setSaved] = useState(false);
 
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+  async function parseFile(file: File) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch("/api/parse-resume", {
+      method: "POST",
+      body: formData,
+    });
+    const data = (await response.json().catch(() => ({}))) as ParseResponse;
+
+    if (!response.ok || !data.text) {
+      throw new Error(data.error || "文件解析失败，请直接粘贴文本。");
+    }
+
+    return data.text;
+  }
+
+  async function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
     setFileName(file.name);
-    setResumeText((current) =>
-      current.trim()
-        ? current
-        : "已上传简历。当前 MVP 演示版不会真实解析文件，请在这里粘贴或编辑识别后的简历文本。",
-    );
+    setIsParsingResume(true);
+    setResumeParseStatus("正在解析简历文件...");
+
+    try {
+      const text = await parseFile(file);
+      setResumeText(text);
+      setResumeParseStatus(`已解析 ${file.name}，请检查文本是否准确。`);
+      markInputsChanged();
+    } catch (error) {
+      setResumeParseStatus(error instanceof Error ? error.message : "简历解析失败，请直接粘贴文本。");
+      markInputsChanged();
+    } finally {
+      setIsParsingResume(false);
+    }
   }
 
-  async function callAnalyzeApi(mode: "analysis" | "generate") {
+  async function handleJdFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setJdFileName(file.name);
+    setIsParsingJd(true);
+    setJdParseStatus("正在解析 JD 文件...");
+
+    try {
+      const text = await parseFile(file);
+      setJdText(text);
+      setJdParseStatus(`已解析 ${file.name}，请检查 JD 文本是否完整。`);
+      markInputsChanged();
+    } catch (error) {
+      setJdParseStatus(error instanceof Error ? error.message : "JD 解析失败，请直接粘贴文本。");
+      markInputsChanged();
+    } finally {
+      setIsParsingJd(false);
+    }
+  }
+
+  function readFieldValue(id: string) {
+    const element = document.getElementById(id);
+    if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+      return element.value;
+    }
+    return "";
+  }
+
+  function getCurrentFormValues(nextAnswers = answers): FormValues {
+    const latestResumeText = readFieldValue("resumeText") || resumeText;
+    const latestJdText = readFieldValue("jdText") || jdText;
+    const latestTargetCompany = readFieldValue("company") || targetCompany;
+    const latestTargetRole = readFieldValue("role") || targetRole;
+
+    if (latestResumeText !== resumeText) setResumeText(latestResumeText);
+    if (latestJdText !== jdText) setJdText(latestJdText);
+    if (latestTargetCompany !== targetCompany) setTargetCompany(latestTargetCompany);
+    if (latestTargetRole !== targetRole) setTargetRole(latestTargetRole);
+
+    return {
+      resumeText: latestResumeText,
+      jdText: latestJdText,
+      targetCompany: latestTargetCompany,
+      targetRole: latestTargetRole,
+      answers: nextAnswers,
+    };
+  }
+
+  async function callAnalyzeApi(mode: "analysis" | "generate", values: FormValues) {
     const response = await fetch("/api/analyze", {
       method: "POST",
       headers: {
@@ -410,11 +495,11 @@ export default function Home() {
       },
       body: JSON.stringify({
         mode,
-        resumeText,
-        jdText,
-        targetCompany,
-        targetRole,
-        answers,
+        resumeText: values.resumeText,
+        jdText: values.jdText,
+        targetCompany: values.targetCompany,
+        targetRole: values.targetRole,
+        answers: values.answers,
       }),
     });
 
@@ -432,13 +517,41 @@ export default function Home() {
     setResultNotice("输入内容已修改，请重新生成匹配诊断。");
   }
 
+  function saveDraft() {
+    const draft = {
+      targetCompany,
+      targetRole,
+      resumeText,
+      jdText,
+      answers,
+      updatedAt: new Date().toISOString(),
+    };
+    window.localStorage.setItem("resume-ai-draft", JSON.stringify(draft));
+    setSaved(true);
+    window.setTimeout(() => setSaved(false), 1600);
+  }
+
   async function startAnalysis() {
+    if (isParsingResume || isParsingJd || isLoading) return;
+    const values = getCurrentFormValues();
+    if (!values.resumeText.trim() || !values.jdText.trim()) {
+      setStage("input");
+      setResultSource("pending");
+      setResultNotice("请先上传或粘贴简历和目标岗位 JD，再生成匹配评分。");
+      if (!values.resumeText.trim()) {
+        setResumeParseStatus("还没有简历文本。请上传 PDF/DOCX/TXT，或直接粘贴简历全文。");
+      }
+      if (!values.jdText.trim()) {
+        setJdParseStatus("还没有 JD 文本。请上传 PDF/DOCX/TXT，或直接粘贴岗位描述。");
+      }
+      return;
+    }
     setIsLoading(true);
     setStage("analysis");
     setResultNotice("正在请求模型生成匹配诊断。如果模型不可用，会自动切换到本地演示结果。");
 
     try {
-      const data = await callAnalyzeApi("analysis");
+      const data = await callAnalyzeApi("analysis", values);
       if (data.analysis) {
         setAnalysis(data.analysis);
       }
@@ -449,7 +562,7 @@ export default function Home() {
           : data.notice || "当前使用本地演示结果。",
       );
     } catch (error) {
-      const fallback = buildAnalysis(resumeText, jdText);
+      const fallback = buildAnalysis(values.resumeText, values.jdText);
       setAnalysis(fallback);
       setResultSource("fallback");
       setResultNotice(error instanceof Error ? `模型请求失败，已使用本地演示结果：${error.message}` : "模型请求失败，已使用本地演示结果。");
@@ -459,18 +572,20 @@ export default function Home() {
   }
 
   async function generateResume() {
+    if (isLoading) return;
+    const values = getCurrentFormValues();
     setIsLoading(true);
     setResultNotice("正在生成优化版完整简历。系统会遵守不编造经历的边界。");
 
     try {
-      const data = await callAnalyzeApi("generate");
+      const data = await callAnalyzeApi("generate", values);
       if (data.analysis) {
         setAnalysis(data.analysis);
       }
       if (data.optimizedResume) {
         setOptimizedResume(data.optimizedResume);
       } else {
-        setOptimizedResume(buildOptimizedResume({ targetRole, targetCompany, answers, analysis }));
+        setOptimizedResume(buildOptimizedResume({ targetRole: values.targetRole, targetCompany: values.targetCompany, answers: values.answers, analysis }));
       }
       setResultSource(data.source === "ai" ? "ai" : "fallback");
       setResultNotice(
@@ -480,7 +595,59 @@ export default function Home() {
       );
       setStage("result");
     } catch (error) {
-      setOptimizedResume(buildOptimizedResume({ targetRole, targetCompany, answers, analysis }));
+      setOptimizedResume(buildOptimizedResume({ targetRole: values.targetRole, targetCompany: values.targetCompany, answers: values.answers, analysis }));
+      setResultSource("fallback");
+      setResultNotice(error instanceof Error ? `模型请求失败，已使用本地演示简历：${error.message}` : "模型请求失败，已使用本地演示简历。");
+      setStage("result");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function skipQuestionsAndGenerate() {
+    const defaultAnswers = { role: "负责模块" };
+    const values = getCurrentFormValues(defaultAnswers);
+    setAnswers(defaultAnswers);
+    setIsLoading(true);
+    setResultNotice("正在生成优化版完整简历。系统会只基于已上传内容，不补写未确认经历。");
+
+    try {
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          mode: "generate",
+          resumeText: values.resumeText,
+          jdText: values.jdText,
+          targetCompany: values.targetCompany,
+          targetRole: values.targetRole,
+          answers: defaultAnswers,
+        }),
+      });
+      const data = (await response.json().catch(() => ({}))) as AnalyzeResponse;
+
+      if (!response.ok) {
+        throw new Error(data.error || `请求失败：${response.status}`);
+      }
+      if (data.analysis) {
+        setAnalysis(data.analysis);
+      }
+      if (data.optimizedResume) {
+        setOptimizedResume(data.optimizedResume);
+      } else {
+        setOptimizedResume(buildOptimizedResume({ targetRole: values.targetRole, targetCompany: values.targetCompany, answers: defaultAnswers, analysis }));
+      }
+      setResultSource(data.source === "ai" ? "ai" : "fallback");
+      setResultNotice(
+        data.source === "ai"
+          ? `已使用真实模型生成优化版简历：${data.model || "当前模型"}。`
+          : data.notice || "当前使用本地演示结果。",
+      );
+      setStage("result");
+    } catch (error) {
+      setOptimizedResume(buildOptimizedResume({ targetRole: values.targetRole, targetCompany: values.targetCompany, answers: defaultAnswers, analysis }));
       setResultSource("fallback");
       setResultNotice(error instanceof Error ? `模型请求失败，已使用本地演示简历：${error.message}` : "模型请求失败，已使用本地演示简历。");
       setStage("result");
@@ -496,7 +663,15 @@ export default function Home() {
   }
 
   async function copyShareLink() {
-    const link = `${window.location.origin}/share/demo-result?hideContact=1`;
+    const payload = {
+      targetCompany,
+      targetRole,
+      analysis,
+      optimizedResume,
+      createdAt: new Date().toISOString(),
+    };
+    const encoded = encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(payload)))));
+    const link = `${window.location.origin}/share/result?data=${encoded}`;
     await navigator.clipboard.writeText(link);
     setShareCopied(true);
     window.setTimeout(() => setShareCopied(false), 1600);
@@ -506,6 +681,7 @@ export default function Home() {
     "--score": analysis.currentScore,
     "--score-color": getColor(analysis.currentScore),
   } as CSSProperties;
+  const canAnalyze = !isParsingResume && !isParsingJd && !isLoading;
 
   return (
     <main className="app-shell">
@@ -524,11 +700,11 @@ export default function Home() {
           <span>当前项目：{targetCompany || "未填写公司"} / {targetRole || "未填写岗位"}</span>
         </div>
         <div className="top-actions">
-          <button className="button secondary" type="button">
+          <button className="button secondary" type="button" onClick={saveDraft}>
             <Save size={16} />
-            保存
+            {saved ? "已保存" : "保存"}
           </button>
-          <button className="button secondary" type="button" onClick={() => downloadDocx(optimizedResume)}>
+          <button className="button secondary" type="button" onClick={() => downloadDocx(optimizedResume || resumeText)} disabled={!optimizedResume && !resumeText}>
             <Download size={16} />
             导出
           </button>
@@ -558,8 +734,8 @@ export default function Home() {
                 </div>
                 <div className="upload-main">
                   <p className="upload-title">{fileName ? `已选择：${fileName}` : "上传简历文件"}</p>
-                  <p className="upload-help">MVP 演示版先展示交互闭环，真实解析服务后续接入。</p>
-                  <input className="file-input" type="file" accept=".pdf,.doc,.docx" onChange={handleFileChange} />
+                  <p className="upload-help">{isParsingResume ? "正在解析，请稍候..." : resumeParseStatus}</p>
+                  <input className="file-input" type="file" accept=".pdf,.docx,.txt" onChange={handleFileChange} disabled={isParsingResume} />
                 </div>
               </div>
 
@@ -569,8 +745,10 @@ export default function Home() {
                   id="resumeText"
                   className="textarea tall"
                   value={resumeText}
+                  placeholder="上传简历后会自动填入解析文本；如果解析不完整，也可以直接粘贴简历全文。"
                   onChange={(event) => {
                     setResumeText(event.target.value);
+                    setResumeParseStatus(event.target.value.trim() ? "已手动填写简历文本，可继续生成匹配评分。" : "还没有简历文本。请上传 PDF/DOCX/TXT，或直接粘贴简历全文。");
                     markInputsChanged();
                   }}
                 />
@@ -622,19 +800,31 @@ export default function Home() {
               </div>
               <div className="field">
                 <label className="field-label" htmlFor="jdText">JD 原文</label>
+                <div className="upload-box">
+                  <div className="upload-icon">
+                    <Upload size={20} />
+                  </div>
+                  <div className="upload-main">
+                    <p className="upload-title">{jdFileName ? `已选择：${jdFileName}` : "上传 JD 文件"}</p>
+                    <p className="upload-help">{isParsingJd ? "正在解析，请稍候..." : jdParseStatus}</p>
+                    <input className="file-input" type="file" accept=".pdf,.docx,.txt" onChange={handleJdFileChange} disabled={isParsingJd} />
+                  </div>
+                </div>
                 <textarea
                   id="jdText"
                   className="textarea tall"
                   value={jdText}
+                  placeholder="粘贴岗位职责、任职要求、加分项等完整 JD 文本。"
                   onChange={(event) => {
                     setJdText(event.target.value);
+                    setJdParseStatus(event.target.value.trim() ? "已手动填写 JD 文本，可继续生成匹配评分。" : "还没有 JD 文本。请上传 PDF/DOCX/TXT，或直接粘贴岗位描述。");
                     markInputsChanged();
                   }}
                 />
               </div>
-              <button className="button primary full large" type="button" onClick={startAnalysis} disabled={!resumeText.trim() || !jdText.trim()}>
+              <button className="button primary full large" type="button" onClick={startAnalysis} disabled={!canAnalyze}>
                 <Sparkles size={17} />
-                生成匹配评分和优化简历
+                {isParsingResume || isParsingJd ? "正在解析文件..." : isLoading ? "正在生成..." : "生成匹配评分和优化简历"}
               </button>
             </div>
           </section>
@@ -656,7 +846,7 @@ export default function Home() {
                 <div className="empty-state">
                   <ShieldCheck size={34} color="#1d4ed8" />
                   <h2>准备生成第一份诊断报告</h2>
-                  <p>左侧已经填入演示简历和 JD。点击主按钮后，会进入“评分、差距、追问、生成优化版简历”的完整流程。</p>
+                  <p>请先上传或粘贴简历，再上传或粘贴目标岗位 JD。系统会生成评分、差距、追问和优化版完整简历。</p>
                 </div>
               ) : isLoading ? (
                 <LoadingSteps />
@@ -777,11 +967,11 @@ export default function Home() {
                   <TaskList tasks={analysis.tasks} />
                   <div className="section-divider" />
                   <QuestionList questions={analysis.questions} answers={answers} setAnswers={setAnswers} />
-                  <button className="button primary full large" type="button" onClick={generateResume}>
+                  <button className="button primary full large" type="button" onClick={generateResume} disabled={isLoading}>
                     <Sparkles size={17} />
-                    生成标准优化版简历
+                    {isLoading ? "正在生成..." : "生成标准优化版简历"}
                   </button>
-                  <button className="button secondary full" type="button" onClick={() => setAnswers({ role: "负责模块" })}>
+                  <button className="button secondary full" type="button" onClick={skipQuestionsAndGenerate} disabled={isLoading}>
                     跳过追问，直接生成
                   </button>
                 </div>
@@ -894,14 +1084,6 @@ function TaskList({ tasks }: { tasks: Task[] }) {
             <span className={`priority ${task.priority}`}>{labels[task.priority]}</span>
           </div>
           <p className="task-text">{task.text}</p>
-          <div className="task-actions">
-            <button className="mini-button" type="button">
-              应用
-            </button>
-            <button className="mini-button" type="button">
-              查看
-            </button>
-          </div>
         </div>
       ))}
     </div>

@@ -87,6 +87,7 @@ export async function POST(request: Request) {
   const resumeText = body.resumeText?.trim() || "";
   const jdText = body.jdText?.trim() || "";
   const mode = body.mode === "generate" ? "generate" : "analysis";
+  const answers = body.answers || {};
 
   if (!resumeText || !jdText) {
     return NextResponse.json({ error: "缺少简历或 JD 文本" }, { status: 400 });
@@ -94,9 +95,10 @@ export async function POST(request: Request) {
 
   const fallbackAnalysis = buildFallbackAnalysis(resumeText, jdText);
   const fallbackResume = buildFallbackOptimizedResume({
+    resumeText,
     targetCompany: body.targetCompany || "",
     targetRole: body.targetRole || "",
-    answers: body.answers || {},
+    answers,
     analysis: fallbackAnalysis,
   });
 
@@ -124,17 +126,24 @@ export async function POST(request: Request) {
         jdText,
         targetCompany: body.targetCompany || "",
         targetRole: body.targetRole || "",
-        answers: body.answers || {},
+        answers,
       },
     });
 
     const analysis = normalizeAnalysis(aiResult.analysis, fallbackAnalysis);
-    const optimizedResume =
+    const rawOptimizedResume =
       mode === "generate" && typeof aiResult.optimizedResume === "string" && aiResult.optimizedResume.trim()
         ? aiResult.optimizedResume.trim()
         : mode === "generate"
           ? fallbackResume
           : undefined;
+    const optimizedResume = rawOptimizedResume
+      ? sanitizeOptimizedResume({
+          optimizedResume: rawOptimizedResume,
+          resumeText,
+          answers,
+        })
+      : undefined;
 
     return NextResponse.json({
       source: "ai",
@@ -216,7 +225,11 @@ function buildSystemPrompt(mode: "analysis" | "generate") {
 4. 缺失要求只能作为追问或风险提示，不能写进简历当成事实。
 5. 低匹配时必须指出最关键的不匹配原因。
 6. 分数是岗位匹配与 ATS 可读性的估计，不承诺通过 ATS。
-7. 必须返回 JSON，不要输出 Markdown，不要输出解释性前后缀。
+7. 用户追问答案为空，代表该信息未确认，不能当作事实。
+8. 不要把“数据看板/反馈整理”推断成 SQL、BI、Tableau、Power BI。
+9. 不要把“知识库/智能客服”推断成大模型、RAG、Agent、LLM，除非原简历或追问答案明确写到。
+10. 不要编造任何百分比、人数、金额、时长、效率提升数值。
+11. 必须返回 JSON，不要输出 Markdown，不要输出解释性前后缀。
 
 JSON 顶层结构：
 {
@@ -242,7 +255,140 @@ JSON 顶层结构：
   }${mode === "generate" ? ',\n  "optimizedResume": string' : ""}
 }
 
-${mode === "generate" ? "optimizedResume 必须是一份完整的中文简历文本，包含个人简介、核心技能、工作经历、项目经历、教育经历等适用部分。" : "questions 必须包含 3-5 个最能提升匹配度的追问。"}`;
+${mode === "generate" ? "optimizedResume 必须是一份完整的中文简历文本，包含个人简介、核心技能、工作经历、项目经历、教育经历等适用部分；没有证据的 JD 关键词只能放在分析和追问里，不能放进 optimizedResume。" : "questions 必须包含 3-5 个最能提升匹配度的追问。"}`;
+}
+
+function sanitizeOptimizedResume({
+  optimizedResume,
+  resumeText,
+  answers,
+}: {
+  optimizedResume: string;
+  resumeText: string;
+  answers: Record<string, string>;
+}) {
+  const evidenceText = `${resumeText}\n${Object.values(answers).join("\n")}`;
+  const normalizedResume = normalizeGeneratedResumeText(optimizedResume, evidenceText);
+  const lines = normalizedResume.split("\n").filter((line) => {
+    const result = unsupportedLineReason(line, evidenceText);
+    if (result) {
+      return false;
+    }
+    return true;
+  });
+  const cleanedLines = removePlaceholderSections(lines);
+  return cleanedLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function normalizeGeneratedResumeText(text: string, evidenceText: string) {
+  return text
+    .split("\n")
+    .map(stripPlaceholderClauses)
+    .map((line) => stripUnsupportedExperienceYears(line, evidenceText))
+    .map((line) => stripUnsupportedOutcomeClauses(line, evidenceText))
+    .join("\n");
+}
+
+function stripPlaceholderClauses(line: string) {
+  return line
+    .replace(/[（(][^）)]*(?:请补充|待补充|暂无|需确认|待确认|具体[^）)]*确认)[^）)]*[）)]/g, "")
+    .replace(/[（(][^）)]*建议补充[^）)]*[）)]/g, "")
+    .replace(/[，。；,;]?[^，。；,;\n]*(?:请补充|待补充|暂无|需确认|待确认|建议补充)[^，。；,;\n]*[，。；,;]?/g, "")
+    .trimEnd();
+}
+
+function stripUnsupportedExperienceYears(line: string, evidenceText: string) {
+  return line.replace(/(\d+)\s*年(?:以上)?(?=[^，。；\n]{0,18}经验)/g, (match, year: string) => {
+    const exactYearPattern = new RegExp(`${year}\\s*年`);
+    return exactYearPattern.test(evidenceText) ? match : "";
+  });
+}
+
+function stripUnsupportedOutcomeClauses(line: string, evidenceText: string) {
+  const guardedMetricTerms = ["准确率", "转化率", "留存率", "覆盖率", "满意度", "成本", "收入", "GMV", "客单价", "续费率"];
+  let nextLine = line;
+
+  for (const term of guardedMetricTerms) {
+    if (nextLine.includes(term) && !evidenceText.includes(term)) {
+      const escapedTerm = escapeRegExp(term);
+      nextLine = nextLine.replace(new RegExp(`[，。；,;]?[^，。；,;\\n]*(?:提升|提高|改善|优化|降低|减少|增长)[^，。；,;\\n]*${escapedTerm}[^，。；,;\\n]*[，。；,;]?`, "g"), "");
+      nextLine = nextLine.replace(new RegExp(`[，。；,;]?[^，。；,;\\n]*${escapedTerm}[^，。；,;\\n]*(?:提升|提高|改善|优化|降低|减少|增长)[^，。；,;\\n]*[，。；,;]?`, "g"), "");
+    }
+  }
+
+  return nextLine.replace(/\s{2,}/g, " ").trimEnd();
+}
+
+function unsupportedLineReason(line: string, evidenceText: string) {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  if (/请补充|待补充|暂无|无相关经历|需确认|待确认|建议补充|\(请补充\)|（请补充）/.test(trimmed)) {
+    return "占位内容";
+  }
+
+  const guardedTerms = [
+    { label: "SQL", pattern: /\bSQL\b|MySQL|PostgreSQL|数据库查询/i },
+    { label: "BI 工具", pattern: /\bBI\b|Tableau|Power\s?BI|FineBI|帆软/i },
+    { label: "大模型", pattern: /大模型|大语言模型|\bLLM\b|GPT|OpenAI|DeepSeek|LangChain/i },
+    { label: "RAG", pattern: /\bRAG\b|检索增强|向量数据库|Embedding/i },
+    { label: "Agent", pattern: /\bAgent\b|智能体/i },
+    { label: "Axure", pattern: /\bAxure\b/i },
+    { label: "Jira", pattern: /\bJira\b/i },
+    { label: "敏捷开发", pattern: /敏捷开发|Scrum/i },
+    { label: "查询日志", pattern: /查询日志|埋点日志|行为日志/ },
+    { label: "准确率", pattern: /准确率/ },
+    { label: "转化率", pattern: /转化率/ },
+    { label: "留存率", pattern: /留存率/ },
+    { label: "覆盖率", pattern: /覆盖率/ },
+    { label: "满意度", pattern: /满意度/ },
+    { label: "成本", pattern: /成本/ },
+  ];
+
+  for (const term of guardedTerms) {
+    if (term.pattern.test(trimmed) && !term.pattern.test(evidenceText)) {
+      return term.label;
+    }
+  }
+
+  const unsupportedMetric = findUnsupportedMetric(trimmed, evidenceText);
+  return unsupportedMetric ? "量化指标" : null;
+}
+
+function removePlaceholderSections(lines: string[]) {
+  const headings = new Set(["个人简介", "核心技能", "技能", "专业技能", "工作经历", "项目经历", "教育经历", "实习经历", "校园经历", "证书", "证书与技能", "补充建议"]);
+  const withoutPlaceholders = lines.filter((line) => !/请补充|待补充|暂无|无相关经历|需确认|待确认|建议补充|\(请补充\)|（请补充）/.test(line.trim()));
+
+  return withoutPlaceholders.filter((line, index) => {
+    const trimmed = line.trim();
+    if (!headings.has(trimmed)) return true;
+
+    const nextContentIndex = withoutPlaceholders.findIndex((item, itemIndex) => itemIndex > index && Boolean(item.trim()));
+    if (nextContentIndex === -1) return false;
+    const nextContent = withoutPlaceholders[nextContentIndex].trim();
+    if (headings.has(nextContent)) return false;
+    if (trimmed !== "项目经历") return true;
+    const nextHeadingIndex = withoutPlaceholders.findIndex((item, itemIndex) => itemIndex > index && headings.has(item.trim()));
+    const sectionEnd = nextHeadingIndex === -1 ? withoutPlaceholders.length : nextHeadingIndex;
+    return withoutPlaceholders.slice(index + 1, sectionEnd).some((item) => item.trim().startsWith("-"));
+  });
+}
+
+function findUnsupportedMetric(line: string, evidenceText: string) {
+  if (!/(提升|降低|减少|增长|节省|缩短|扩大|转化率|效率|成本|覆盖率|准确率)/.test(line)) {
+    return false;
+  }
+
+  const numbers = line.match(/\d+(?:\.\d+)?%?/g) || [];
+  return numbers.some((number) => {
+    if (/^20\d{2}$/.test(number) || /^20\d{2}\.\d{1,2}$/.test(number)) {
+      return false;
+    }
+    return !evidenceText.includes(number);
+  });
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function normalizeAnalysis(input: unknown, fallback: Analysis): Analysis {
@@ -422,11 +568,13 @@ function buildFallbackAnalysis(resumeText: string, jdText: string): Analysis {
 }
 
 function buildFallbackOptimizedResume({
+  resumeText,
   targetRole,
   targetCompany,
   answers,
   analysis,
 }: {
+  resumeText: string;
   targetRole: string;
   targetCompany: string;
   answers: Record<string, string>;
@@ -436,34 +584,13 @@ function buildFallbackOptimizedResume({
   const companyLine = targetCompany ? `目标公司：${targetCompany}` : "";
   const responsibility = answers.role || "负责模块";
   const transitionNote = analysis.isTransition ? "\n版本标记：转型尝试版。当前简历仍存在关键经历缺口，建议补充真实项目或作品集后再重点投递。\n" : "";
+  const normalizedResume = resumeText.replace(/\r/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  const sections = [`求职方向：${role}`, companyLine, transitionNote.trim(), "优化版简历正文", normalizedResume].filter(Boolean);
+  const suggestions = [
+    "本版本为保守优化版：在模型不可用时，系统不会重写或新增未经确认的经历。",
+    `责任强度按“${responsibility}”处理；如不准确，请返回追问区修改。`,
+    "如确有 SQL、BI、大模型、Agent、RAG 或具体量化结果，请在追问中补充真实场景后再生成最终投递版。",
+  ];
 
-  return `张明
-手机号：138 0000 0000 | 邮箱：zhangming@example.com | 上海
-
-求职方向：${role}
-${companyLine}${transitionNote}
-个人简介
-3 年产品经理经验，重点参与企业后台、内部效率工具、智能客服知识库和用户增长相关项目。熟悉需求调研、产品规划、原型设计、跨部门项目推进与上线迭代。
-
-核心技能
-- 产品能力：需求分析、用户调研、PRD 撰写、原型设计、版本规划、跨部门协作、项目推进。
-- B 端产品：参与企业客户管理后台、内部效率工具或运营配置平台建设。
-- ATS 关键词：AI 产品、智能客服、知识库、自动化工具、企业后台、工作流、数据反馈、用户体验优化。
-
-工作经历
-星河科技 | 产品经理 | 2022.03 - 至今
-- ${responsibility}企业客户管理后台和内部效率工具的需求梳理与功能设计，围绕客户资料管理、运营配置和流程协作场景输出产品方案。
-- 参与用户增长活动配置工具建设，梳理运营团队从活动创建、规则配置到效果复盘的完整流程，推动配置链路标准化。
-- 基于用户反馈、客服问题和使用数据整理迭代需求，推动后台体验、配置效率和问题定位能力优化。
-
-项目经历
-智能客服知识库优化项目 | 产品负责人 | 2023.06 - 2023.12
-- 梳理客服高频问题、知识库结构和问答配置流程，设计面向业务人员的知识维护和搜索推荐功能。
-- 与技术团队协作上线知识库搜索、推荐和配置能力，减少客服重复查询时间，并为后续智能助手或 AI 问答场景沉淀标准化知识内容。
-
-教育经历
-上海大学 | 工商管理 | 本科
-
-补充建议
-- 若你确实有 SQL、BI、大模型、Agent、RAG 或具体量化结果，请补充真实使用场景后再生成最终投递版。`;
+  return `${sections.join("\n")}\n\n补充建议\n- ${suggestions.join("\n- ")}`;
 }
