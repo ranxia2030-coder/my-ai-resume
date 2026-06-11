@@ -1,6 +1,6 @@
 import mammoth from "mammoth";
 import { NextResponse } from "next/server";
-import { PDFParse } from "pdf-parse";
+import pdfParse from "pdf-parse/lib/pdf-parse";
 
 export const runtime = "nodejs";
 
@@ -25,13 +25,8 @@ export async function POST(request: Request) {
     let text = "";
 
     if (file.type === "application/pdf" || fileName.endsWith(".pdf")) {
-      const parser = new PDFParse({ data: new Uint8Array(buffer) });
-      try {
-        const result = await parser.getText();
-        text = result.text;
-      } finally {
-        await parser.destroy();
-      }
+      const result = await pdfParse(buffer);
+      text = result.text;
     } else if (
       file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
       fileName.endsWith(".docx")
