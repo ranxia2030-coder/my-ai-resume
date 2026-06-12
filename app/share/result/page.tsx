@@ -2,7 +2,7 @@
 
 import { Download, FileText, LockKeyhole, Share2, ShieldCheck } from "lucide-react";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useEffect, useState } from "react";
 
 type SharedAnalysis = {
   currentScore?: number;
@@ -22,7 +22,10 @@ function decodePayload(data: string | null): SharedPayload | null {
   if (!data) return null;
 
   try {
-    return JSON.parse(decodeURIComponent(escape(atob(decodeURIComponent(data))))) as SharedPayload;
+    const base64 = decodeURIComponent(data);
+    const binary = atob(base64);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes)) as SharedPayload;
   } catch {
     return null;
   }
@@ -35,9 +38,10 @@ function hideContact(text: string) {
 }
 
 export default function SharedResultPage() {
-  const payload = useMemo(() => {
-    if (typeof window === "undefined") return null;
-    return decodePayload(new URLSearchParams(window.location.search).get("data"));
+  const [payload, setPayload] = useState<SharedPayload | null>(null);
+
+  useEffect(() => {
+    setPayload(decodePayload(new URLSearchParams(window.location.search).get("data")));
   }, []);
 
   const resumeText = hideContact(payload?.optimizedResume || "");

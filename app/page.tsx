@@ -2,25 +2,21 @@
 
 import {
   AlertTriangle,
+  ArrowRight,
   BarChart3,
-  CheckCircle2,
-  Copy,
-  Download,
-  ExternalLink,
   FileText,
   LockKeyhole,
-  RotateCcw,
+  ScanText,
   Save,
-  Share2,
   ShieldCheck,
   Sparkles,
   Target,
   Upload,
   UserCircle,
 } from "lucide-react";
-import { ChangeEvent, CSSProperties, useState } from "react";
+import { ChangeEvent, CSSProperties, useEffect, useRef, useState } from "react";
 
-type Stage = "input" | "analysis" | "result";
+type Stage = "input" | "analysis";
 type Severity = "high" | "medium";
 type Priority = "high" | "medium" | "quick";
 
@@ -64,7 +60,7 @@ type Analysis = {
 };
 
 type AnalyzeResponse = {
-  source?: "ai" | "fallback";
+  source?: "ai";
   model?: string;
   notice?: string;
   analysis?: Analysis;
@@ -85,41 +81,15 @@ type FormValues = {
   answers: Record<string, string>;
 };
 
-const sampleResume = `张明
-手机号：138 0000 0000 | 邮箱：zhangming@example.com | 上海
-
-求职方向：产品经理
-
-个人简介
-3 年产品经验，参与企业内部工具、用户增长和内容运营相关项目。熟悉需求调研、竞品分析、原型设计和跨部门协作。
-
-工作经历
-星河科技 | 产品经理 | 2022.03 - 至今
-- 负责企业客户管理后台的需求梳理和功能设计，协同研发、设计、测试推进版本上线。
-- 参与用户增长活动配置工具建设，支持运营团队提升活动上线效率。
-- 跟踪用户反馈和使用数据，整理迭代需求并推动功能优化。
-
-项目经历
-智能客服知识库优化项目 | 产品负责人 | 2023.06 - 2023.12
-- 梳理客服高频问题和知识库结构，设计问答配置流程。
-- 协同技术团队上线知识库搜索与推荐功能，减少客服重复查询时间。
-
-教育经历
-上海大学 | 工商管理 | 本科`;
-
-const sampleJd = `AI 产品经理
-
-岗位职责：
-1. 负责 AI 产品方向的需求分析、产品规划和功能设计，推动大模型应用能力落地。
-2. 与算法、研发、设计、运营团队协作，持续优化用户体验和业务指标。
-3. 围绕企业客户场景，设计 B 端 SaaS 或内部效率工具产品。
-4. 基于用户反馈和数据分析，持续迭代产品策略。
-
-任职要求：
-1. 3 年以上产品经验，有 AI 产品、大模型、智能助手、Agent 或 RAG 项目经验优先。
-2. 熟悉 B 端 SaaS、企业后台、工作流或数据看板类产品。
-3. 具备较强的数据分析能力，熟悉 SQL、Excel 或 BI 工具优先。
-4. 能独立完成需求文档、原型设计、跨部门项目推进。`;
+type ResultPayload = {
+  targetCompany: string;
+  targetRole: string;
+  resumeText: string;
+  jdText: string;
+  analysis: Analysis;
+  optimizedResume: string;
+  createdAt: string;
+};
 
 const defaultQuestions: Question[] = [
   {
@@ -152,232 +122,32 @@ const defaultQuestions: Question[] = [
 
 const roleOptions = ["主导", "负责模块", "协助参与"];
 
-function buildAnalysis(resumeText: string, jdText: string): Analysis {
-  const combined = `${resumeText} ${jdText}`.toLowerCase();
-  const resume = resumeText.toLowerCase();
-  const jd = jdText.toLowerCase();
-
-  const hasAi =
-    /ai|大模型|智能|自动化|客服|助手|agent|rag|llm/.test(resume) ||
-    resume.includes("知识库");
-  const hasB2b = /b端|b 端|saas|企业|后台|管理平台|内部工具|客户管理/.test(resume);
-  const hasData = /sql|数据|excel|bi|看板|指标|转化率|增长/.test(resume);
-  const hasMetrics = /%|提升|降低|减少|增长|效率|成本/.test(resume);
-  const jdAi = /ai|大模型|agent|rag|智能/.test(jd);
-  const jdData = /sql|数据|bi|看板|指标/.test(jd);
-
-  let currentScore = 54;
-  if (hasAi) currentScore += 10;
-  if (hasB2b) currentScore += 12;
-  if (hasData) currentScore += 9;
-  if (hasMetrics) currentScore += 7;
-  if (resume.length > 260) currentScore += 5;
-  if (!jdAi) currentScore += 4;
-  if (!jdData) currentScore += 3;
-  currentScore = Math.min(88, currentScore);
-
-  const optimizedScore = Math.min(94, currentScore + (currentScore < 65 ? 18 : 13));
-  const isTransition = currentScore < 65;
-
-  const dimensions = [
-    { label: "JD 关键词覆盖", value: Math.min(92, currentScore + (hasAi ? 5 : -6)) },
-    { label: "工作/项目经历相关性", value: Math.min(90, currentScore + (hasB2b ? 8 : -4)) },
-    { label: "技能匹配度", value: Math.min(88, currentScore + (hasData ? 5 : -8)) },
-    { label: "ATS 格式友好度", value: 84 },
-    { label: "年限/硬性门槛匹配", value: 72 },
-  ].map((item) => ({ ...item, value: Math.max(36, item.value) }));
-
-  const matchedKeywords = [
-    hasB2b ? "企业后台" : "产品规划",
-    "跨部门协作",
-    hasAi ? "智能工具" : "需求分析",
-    hasData ? "数据反馈" : "原型设计",
-  ];
-
-  const missingKeywords = [
-    !hasAi ? "大模型/Agent" : "RAG",
-    !hasData ? "SQL/BI" : "量化指标",
-    "ATS 关键词",
-    "业务结果",
-  ];
-
-  const lowRelevanceKeywords = ["内容运营", "活动执行", "通用沟通"];
-
-  const issues: Issue[] = [
-    {
-      title: hasAi ? "AI 相关经历需要更贴近 JD 语言" : "AI 产品经验没有形成明确证据",
-      text: hasAi
-        ? "简历里有智能客服或自动化相关经历，但还没有自然覆盖大模型、智能助手、AI 产品规划等高权重词。"
-        : "JD 强调大模型、Agent 或 AI 产品经验，但当前简历缺少可以直接识别的 AI 项目证据。",
-      severity: "high",
-    },
-    {
-      title: hasData ? "数据分析结果表达偏弱" : "数据分析能力缺少证据",
-      text: hasData
-        ? "简历提到反馈和数据，但没有把工具、指标、业务结果写清楚，ATS 和 HR 难以判断强度。"
-        : "JD 多次提到数据分析、SQL 或 BI，但简历没有明确工具和分析场景。",
-      severity: "high",
-    },
-    {
-      title: hasB2b ? "B 端经验可以进一步前置" : "B 端/SaaS 相关表达不足",
-      text: hasB2b
-        ? "企业后台和客户管理经历可转译为 B 端产品经验，建议放入个人简介和核心技能。"
-        : "JD 要求企业客户场景或 SaaS 产品经验，当前简历没有明显对应内容。",
-      severity: "medium",
-    },
-  ];
-
-  const tasks: Task[] = [
-    {
-      priority: "high",
-      title: "把最相关项目前置",
-      text: "将智能客服、企业后台、自动化工具等经历放到个人简介和项目经历前半部分。",
-    },
-    {
-      priority: "medium",
-      title: "补充真实工具与指标",
-      text: "只有在用户确认后，才把 SQL、BI、效率提升、转化率等内容写入优化版简历。",
-    },
-    {
-      priority: "quick",
-      title: "改成 ATS 友好结构",
-      text: "使用单栏、标准标题、清晰技能区，避免复杂表格和图片化文字。",
-    },
-  ];
-
-  return {
-    currentScore,
-    optimizedScore,
-    scoreLabel: isTransition ? "匹配较弱" : currentScore >= 80 ? "较匹配" : "中等匹配",
-    recommendation: isTransition ? "建议先补充真实经历，再作为转型尝试投递" : "建议使用优化版简历后投递",
-    isTransition,
-    dimensions,
-    matchedKeywords,
-    missingKeywords,
-    lowRelevanceKeywords,
-    issues,
-    tasks,
-    questions: defaultQuestions,
-  };
-}
-
-function buildOptimizedResume(params: {
-  targetRole: string;
-  targetCompany: string;
-  answers: Record<string, string>;
-  analysis: Analysis;
-}) {
-  const { targetRole, targetCompany, answers, analysis } = params;
-  const role = targetRole || "AI 产品经理";
-  const companyLine = targetCompany ? `目标公司：${targetCompany}` : "";
-  const responsibility = answers.role || "负责模块";
-  const aiAnswer = answers.ai?.trim();
-  const dataAnswer = answers.data?.trim();
-  const b2bAnswer = answers.b2b?.trim();
-  const metricAnswer = answers.metric?.trim();
-
-  const aiLine = aiAnswer
-    ? `- 结合过往 ${aiAnswer}，将智能工具、知识库或自动化相关经历转译为 AI 产品落地经验。`
-    : "- 具备智能客服、知识库配置、自动化工具相关项目经验，可围绕 AI 产品场景继续补充真实案例。";
-
-  const dataLine = dataAnswer
-    ? `- 数据分析：${dataAnswer}，能够基于反馈和指标推动产品迭代。`
-    : "- 数据分析：具备用户反馈整理和基础指标跟踪经验；如确有 SQL/BI 使用经历，建议补充具体场景。";
-
-  const b2bLine = b2bAnswer
-    ? `- B 端产品：${b2bAnswer}，熟悉企业用户场景、后台流程和跨角色协作。`
-    : "- B 端产品：参与企业客户管理后台、内部效率工具或运营配置平台建设。";
-
-  const metricLine = metricAnswer
-    ? `，${metricAnswer}`
-    : "，支持业务团队提升配置效率与问题处理效率";
-
-  const transitionNote = analysis.isTransition
-    ? "\n版本标记：转型尝试版。当前简历仍存在关键经历缺口，建议补充真实项目或作品集后再重点投递。\n"
-    : "";
-
-  return `张明
-手机号：138 0000 0000 | 邮箱：zhangming@example.com | 上海
-
-求职方向：${role}
-${companyLine}${transitionNote}
-个人简介
-3 年产品经理经验，重点参与企业后台、内部效率工具、智能客服知识库和用户增长相关项目。熟悉需求调研、产品规划、原型设计、跨部门项目推进与上线迭代。能够围绕目标岗位 JD 中的 AI 产品、B 端系统、数据分析和业务效率提升要求，梳理真实经历并输出可落地的产品方案。
-
-核心技能
-- 产品能力：需求分析、用户调研、PRD 撰写、原型设计、版本规划、跨部门协作、项目推进。
-${b2bLine}
-${aiLine}
-${dataLine}
-- ATS 关键词：AI 产品、智能客服、知识库、自动化工具、企业后台、工作流、数据反馈、用户体验优化。
-
-工作经历
-星河科技 | 产品经理 | 2022.03 - 至今
-- ${responsibility}企业客户管理后台和内部效率工具的需求梳理与功能设计，围绕客户资料管理、运营配置和流程协作场景输出产品方案，并协同研发、设计、测试推进版本上线。
-- 参与用户增长活动配置工具建设，梳理运营团队从活动创建、规则配置到效果复盘的完整流程，推动配置链路标准化${metricLine}。
-- 基于用户反馈、客服问题和使用数据整理迭代需求，推动后台体验、配置效率和问题定位能力优化。
-
-项目经历
-智能客服知识库优化项目 | 产品负责人 | 2023.06 - 2023.12
-- 梳理客服高频问题、知识库结构和问答配置流程，设计面向业务人员的知识维护和搜索推荐功能。
-- 与技术团队协作上线知识库搜索、推荐和配置能力，减少客服重复查询时间，并为后续智能助手或 AI 问答场景沉淀标准化知识内容。
-- 将原有“知识库优化”经历转译为与目标 JD 更相关的智能工具、自动化问答和 AI 产品基础能力，但不虚构未确认的大模型研发职责。
-
-企业客户管理后台项目 | 产品经理 | 2022.06 - 2023.05
-- 面向销售、运营、客服等多角色使用场景，完成客户信息、跟进记录、权限配置和数据查看等模块设计。
-- 输出需求文档和原型，协调研发排期、设计评审、测试验收和上线反馈，保障功能按版本计划落地。
-- 通过统一字段、规范流程和优化页面信息层级，提升内部团队对客户状态和服务进展的识别效率。
-
-教育经历
-上海大学 | 工商管理 | 本科
-
-补充建议
-- 若你确实有 SQL、BI、大模型、Agent、RAG 或具体量化结果，请补充真实使用场景后再生成最终投递版。
-- 面试时请围绕上述经历准备可解释案例，避免使用无法证明的技能或结果。`;
-}
-
 function getColor(value: number) {
   if (value >= 80) return "#059669";
   if (value >= 65) return "#d97706";
   return "#dc2626";
 }
 
-function downloadTextFile(filename: string, text: string) {
-  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
-
-async function downloadDocx(resumeText: string) {
-  const response = await fetch("/api/docx", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ resumeText }),
-  });
-
-  if (!response.ok) {
-    downloadTextFile("优化版简历.txt", resumeText);
-    return;
-  }
-
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = "优化版简历.docx";
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
+const emptyAnalysis: Analysis = {
+  currentScore: 0,
+  optimizedScore: 0,
+  scoreLabel: "等待评分",
+  recommendation: "请上传简历和 JD 后生成匹配诊断",
+  isTransition: false,
+  dimensions: [
+    { label: "JD 关键词覆盖", value: 0 },
+    { label: "工作/项目经历相关性", value: 0 },
+    { label: "技能匹配度", value: 0 },
+    { label: "ATS 格式友好度", value: 0 },
+    { label: "年限/硬性门槛匹配", value: 0 },
+  ],
+  matchedKeywords: [],
+  missingKeywords: [],
+  lowRelevanceKeywords: [],
+  issues: [],
+  tasks: [],
+  questions: defaultQuestions,
+};
 
 export default function Home() {
   const [stage, setStage] = useState<Stage>("input");
@@ -387,21 +157,20 @@ export default function Home() {
   const [jdText, setJdText] = useState("");
   const [fileName, setFileName] = useState("");
   const [jdFileName, setJdFileName] = useState("");
-  const [resumeParseStatus, setResumeParseStatus] = useState("支持 PDF、DOCX、TXT；扫描版图片请先复制文字后粘贴。");
-  const [jdParseStatus, setJdParseStatus] = useState("支持 PDF、DOCX、TXT；招聘截图和链接请先复制 JD 文字。");
+  const [resumeParseStatus, setResumeParseStatus] = useState("支持 PDF、DOCX、TXT、PNG、JPG。图片会自动 OCR 识别。");
+  const [jdParseStatus, setJdParseStatus] = useState("支持粘贴 JD，也支持上传 JD 截图做 OCR。");
   const [isParsingResume, setIsParsingResume] = useState(false);
   const [isParsingJd, setIsParsingJd] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [analysis, setAnalysis] = useState<Analysis>(() => buildAnalysis(sampleResume, sampleJd));
-  const [optimizedResume, setOptimizedResume] = useState("");
-  const [resultNotice, setResultNotice] = useState("当前还未调用模型。点击左侧按钮后会优先请求 DeepSeek，失败时使用本地兜底。");
-  const [resultSource, setResultSource] = useState<"pending" | "ai" | "fallback">("pending");
+  const [analysis, setAnalysis] = useState<Analysis>(emptyAnalysis);
+  const [resultNotice, setResultNotice] = useState("当前还未调用模型。请上传简历和 JD 后生成匹配评分。");
+  const [resultSource, setResultSource] = useState<"pending" | "ai" | "error">("pending");
   const [answers, setAnswers] = useState<Record<string, string>>({
     role: "负责模块",
   });
-  const [copied, setCopied] = useState(false);
-  const [shareCopied, setShareCopied] = useState(false);
   const [saved, setSaved] = useState(false);
+  const autoAnalysisTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastAutoAnalysisKeyRef = useRef("");
 
   async function parseFile(file: File) {
     const formData = new FormData();
@@ -424,13 +193,17 @@ export default function Home() {
     if (!file) return;
     setFileName(file.name);
     setIsParsingResume(true);
-    setResumeParseStatus("正在解析简历文件...");
+    setResumeParseStatus(file.type.startsWith("image/") ? "正在 OCR 识别简历图片..." : "正在解析简历文件...");
 
     try {
       const text = await parseFile(file);
       setResumeText(text);
       setResumeParseStatus(`已解析 ${file.name}，请检查文本是否准确。`);
       markInputsChanged();
+      const nextValues = { resumeText: text, jdText, targetCompany, targetRole, answers };
+      if (text.trim().length >= 20 && jdText.trim().length >= 20) {
+        void runAnalysis(nextValues, "auto");
+      }
     } catch (error) {
       setResumeParseStatus(error instanceof Error ? error.message : "简历解析失败，请直接粘贴文本。");
       markInputsChanged();
@@ -444,13 +217,17 @@ export default function Home() {
     if (!file) return;
     setJdFileName(file.name);
     setIsParsingJd(true);
-    setJdParseStatus("正在解析 JD 文件...");
+    setJdParseStatus(file.type.startsWith("image/") ? "正在 OCR 识别 JD 图片..." : "正在解析 JD 文件...");
 
     try {
       const text = await parseFile(file);
       setJdText(text);
       setJdParseStatus(`已解析 ${file.name}，请检查 JD 文本是否完整。`);
       markInputsChanged();
+      const nextValues = { resumeText, jdText: text, targetCompany, targetRole, answers };
+      if (resumeText.trim().length >= 20 && text.trim().length >= 20) {
+        void runAnalysis(nextValues, "auto");
+      }
     } catch (error) {
       setJdParseStatus(error instanceof Error ? error.message : "JD 解析失败，请直接粘贴文本。");
       markInputsChanged();
@@ -514,7 +291,7 @@ export default function Home() {
 
   function markInputsChanged() {
     setResultSource("pending");
-    setResultNotice("输入内容已修改，请重新生成匹配诊断。");
+    setResultNotice("输入内容已修改，系统会在简历和 JD 都完整后自动刷新匹配评分。");
   }
 
   function saveDraft() {
@@ -531,9 +308,17 @@ export default function Home() {
     window.setTimeout(() => setSaved(false), 1600);
   }
 
-  async function startAnalysis() {
+  function buildAnalysisKey(values: FormValues) {
+    return JSON.stringify({
+      resumeText: values.resumeText.trim(),
+      jdText: values.jdText.trim(),
+      targetCompany: values.targetCompany.trim(),
+      targetRole: values.targetRole.trim(),
+    });
+  }
+
+  async function runAnalysis(values: FormValues, trigger: "auto" | "manual") {
     if (isParsingResume || isParsingJd || isLoading) return;
-    const values = getCurrentFormValues();
     if (!values.resumeText.trim() || !values.jdText.trim()) {
       setStage("input");
       setResultSource("pending");
@@ -546,29 +331,31 @@ export default function Home() {
       }
       return;
     }
+    lastAutoAnalysisKeyRef.current = buildAnalysisKey(values);
     setIsLoading(true);
     setStage("analysis");
-    setResultNotice("正在请求模型生成匹配诊断。如果模型不可用，会自动切换到本地演示结果。");
+    setResultNotice(trigger === "auto" ? "已检测到简历和 JD，正在自动生成匹配诊断。" : "正在请求模型生成匹配诊断。");
 
     try {
       const data = await callAnalyzeApi("analysis", values);
-      if (data.analysis) {
-        setAnalysis(data.analysis);
+      if (!data.analysis) {
+        throw new Error("模型没有返回匹配诊断结果");
       }
-      setResultSource(data.source === "ai" ? "ai" : "fallback");
-      setResultNotice(
-        data.source === "ai"
-          ? `已使用真实模型生成诊断结果：${data.model || "当前模型"}。`
-          : data.notice || "当前使用本地演示结果。",
-      );
+      setAnalysis(data.analysis);
+      setResultSource("ai");
+      setResultNotice(`已使用真实模型生成诊断结果：${data.model || "当前模型"}。`);
     } catch (error) {
-      const fallback = buildAnalysis(values.resumeText, values.jdText);
-      setAnalysis(fallback);
-      setResultSource("fallback");
-      setResultNotice(error instanceof Error ? `模型请求失败，已使用本地演示结果：${error.message}` : "模型请求失败，已使用本地演示结果。");
+      setAnalysis(emptyAnalysis);
+      setResultSource("error");
+      setResultNotice(error instanceof Error ? `AI 模型暂时无法使用，无法生成匹配评分：${error.message}` : "AI 模型暂时无法使用，无法生成匹配评分。");
     } finally {
       setIsLoading(false);
     }
+  }
+
+  async function startAnalysis() {
+    const values = getCurrentFormValues();
+    await runAnalysis(values, "manual");
   }
 
   async function generateResume() {
@@ -579,29 +366,48 @@ export default function Home() {
 
     try {
       const data = await callAnalyzeApi("generate", values);
-      if (data.analysis) {
-        setAnalysis(data.analysis);
+      if (!data.analysis || !data.optimizedResume) {
+        throw new Error("模型没有返回可用的优化版简历");
       }
-      if (data.optimizedResume) {
-        setOptimizedResume(data.optimizedResume);
-      } else {
-        setOptimizedResume(buildOptimizedResume({ targetRole: values.targetRole, targetCompany: values.targetCompany, answers: values.answers, analysis }));
-      }
-      setResultSource(data.source === "ai" ? "ai" : "fallback");
-      setResultNotice(
-        data.source === "ai"
-          ? `已使用真实模型生成优化版简历：${data.model || "当前模型"}。`
-          : data.notice || "当前使用本地演示结果。",
-      );
-      setStage("result");
+      setAnalysis(data.analysis);
+      const nextAnalysis = data.analysis;
+      const nextOptimizedResume = data.optimizedResume;
+      setResultSource("ai");
+      setResultNotice(`已使用真实模型生成优化版简历：${data.model || "当前模型"}。`);
+      openResultPage({
+        values,
+        nextAnalysis,
+        nextOptimizedResume,
+      });
     } catch (error) {
-      setOptimizedResume(buildOptimizedResume({ targetRole: values.targetRole, targetCompany: values.targetCompany, answers: values.answers, analysis }));
-      setResultSource("fallback");
-      setResultNotice(error instanceof Error ? `模型请求失败，已使用本地演示简历：${error.message}` : "模型请求失败，已使用本地演示简历。");
-      setStage("result");
+      setResultSource("error");
+      setResultNotice(error instanceof Error ? `AI 模型暂时无法使用，无法生成优化版简历：${error.message}` : "AI 模型暂时无法使用，无法生成优化版简历。");
     } finally {
       setIsLoading(false);
     }
+  }
+
+  function openResultPage({
+    values,
+    nextAnalysis,
+    nextOptimizedResume,
+  }: {
+    values: FormValues;
+    nextAnalysis: Analysis;
+    nextOptimizedResume: string;
+  }) {
+    const payload: ResultPayload = {
+      targetCompany: values.targetCompany,
+      targetRole: values.targetRole,
+      resumeText: values.resumeText,
+      jdText: values.jdText,
+      analysis: nextAnalysis,
+      optimizedResume: nextOptimizedResume,
+      createdAt: new Date().toISOString(),
+    };
+    const resultId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`;
+    window.sessionStorage.setItem(`jdalign-result-${resultId}`, JSON.stringify(payload));
+    window.location.href = `/result?id=${encodeURIComponent(resultId)}`;
   }
 
   async function skipQuestionsAndGenerate() {
@@ -631,50 +437,25 @@ export default function Home() {
       if (!response.ok) {
         throw new Error(data.error || `请求失败：${response.status}`);
       }
-      if (data.analysis) {
-        setAnalysis(data.analysis);
+      if (!data.analysis || !data.optimizedResume) {
+        throw new Error("模型没有返回可用的优化版简历");
       }
-      if (data.optimizedResume) {
-        setOptimizedResume(data.optimizedResume);
-      } else {
-        setOptimizedResume(buildOptimizedResume({ targetRole: values.targetRole, targetCompany: values.targetCompany, answers: defaultAnswers, analysis }));
-      }
-      setResultSource(data.source === "ai" ? "ai" : "fallback");
-      setResultNotice(
-        data.source === "ai"
-          ? `已使用真实模型生成优化版简历：${data.model || "当前模型"}。`
-          : data.notice || "当前使用本地演示结果。",
-      );
-      setStage("result");
+      setAnalysis(data.analysis);
+      const nextAnalysis = data.analysis;
+      const nextOptimizedResume = data.optimizedResume;
+      setResultSource("ai");
+      setResultNotice(`已使用真实模型生成优化版简历：${data.model || "当前模型"}。`);
+      openResultPage({
+        values,
+        nextAnalysis,
+        nextOptimizedResume,
+      });
     } catch (error) {
-      setOptimizedResume(buildOptimizedResume({ targetRole: values.targetRole, targetCompany: values.targetCompany, answers: defaultAnswers, analysis }));
-      setResultSource("fallback");
-      setResultNotice(error instanceof Error ? `模型请求失败，已使用本地演示简历：${error.message}` : "模型请求失败，已使用本地演示简历。");
-      setStage("result");
+      setResultSource("error");
+      setResultNotice(error instanceof Error ? `AI 模型暂时无法使用，无法生成优化版简历：${error.message}` : "AI 模型暂时无法使用，无法生成优化版简历。");
     } finally {
       setIsLoading(false);
     }
-  }
-
-  async function copyResume() {
-    await navigator.clipboard.writeText(optimizedResume);
-    setCopied(true);
-    window.setTimeout(() => setCopied(false), 1600);
-  }
-
-  async function copyShareLink() {
-    const payload = {
-      targetCompany,
-      targetRole,
-      analysis,
-      optimizedResume,
-      createdAt: new Date().toISOString(),
-    };
-    const encoded = encodeURIComponent(btoa(unescape(encodeURIComponent(JSON.stringify(payload)))));
-    const link = `${window.location.origin}/share/result?data=${encoded}`;
-    await navigator.clipboard.writeText(link);
-    setShareCopied(true);
-    window.setTimeout(() => setShareCopied(false), 1600);
   }
 
   const scoreStyle = {
@@ -683,16 +464,46 @@ export default function Home() {
   } as CSSProperties;
   const canAnalyze = !isParsingResume && !isParsingJd && !isLoading;
 
+  useEffect(() => {
+    if (autoAnalysisTimerRef.current) {
+      clearTimeout(autoAnalysisTimerRef.current);
+    }
+
+    const nextValues: FormValues = {
+      resumeText,
+      jdText,
+      targetCompany,
+      targetRole,
+      answers,
+    };
+    const hasEnoughInput = resumeText.trim().length >= 20 && jdText.trim().length >= 20;
+    const nextKey = buildAnalysisKey(nextValues);
+
+    if (!hasEnoughInput || isParsingResume || isParsingJd || isLoading || nextKey === lastAutoAnalysisKeyRef.current) {
+      return;
+    }
+
+    autoAnalysisTimerRef.current = setTimeout(() => {
+      void runAnalysis(nextValues, "auto");
+    }, 900);
+
+    return () => {
+      if (autoAnalysisTimerRef.current) {
+        clearTimeout(autoAnalysisTimerRef.current);
+      }
+    };
+  }, [resumeText, jdText, targetCompany, targetRole, isParsingResume, isParsingJd, isLoading]);
+
   return (
-    <main className="app-shell">
+    <main className="app-shell dashboard-page">
       <header className="topbar">
         <div className="brand">
           <div className="brand-mark">
-            <Sparkles size={20} />
+            J
           </div>
           <div>
-            <h1 className="brand-title">AI 简历 ATS 优化工作台</h1>
-            <p className="brand-subtitle">面向中国求职者的 JD 匹配诊断与简历生成</p>
+            <h1 className="brand-title">JDAlign</h1>
+            <p className="brand-subtitle">帮你把简历和 JD 对齐，修改成 HR 想要的模样</p>
           </div>
         </div>
         <div className="project-status">
@@ -704,10 +515,6 @@ export default function Home() {
             <Save size={16} />
             {saved ? "已保存" : "保存"}
           </button>
-          <button className="button secondary" type="button" onClick={() => downloadDocx(optimizedResume || resumeText)} disabled={!optimizedResume && !resumeText}>
-            <Download size={16} />
-            导出
-          </button>
           <button className="button ghost" type="button">
             <UserCircle size={18} />
             访客
@@ -715,29 +522,44 @@ export default function Home() {
         </div>
       </header>
 
-      <section className="workspace">
-        <aside className="column">
-          <section className="panel">
+      <section className="product-hero">
+        <div>
+          <p className="eyebrow">ATS 简历对齐工作台</p>
+          <h2>上传简历和 JD，先看匹配差距，再生成可投递版本</h2>
+        </div>
+        <div className="hero-steps">
+          <span>上传/粘贴</span>
+          <ArrowRight size={16} />
+          <span>匹配评分</span>
+          <ArrowRight size={16} />
+          <span>生成对照版</span>
+        </div>
+      </section>
+
+      <section className="workspace dashboard-grid">
+        <aside className="column input-column">
+          <section className="panel resume-panel">
             <div className="panel-header">
               <div>
                 <div className="panel-title-row">
                   <FileText size={17} color="#1d4ed8" />
                   <h2 className="panel-title">简历输入</h2>
                 </div>
-                <p className="panel-kicker">支持 PDF、DOCX，解析失败时可直接粘贴文本。</p>
+                <p className="panel-kicker">支持 PDF、DOCX、TXT、图片 OCR，也可以直接粘贴文本。</p>
               </div>
             </div>
             <div className="panel-body stack">
-              <div className="upload-box">
+              <label className="upload-box" htmlFor="resumeFile">
                 <div className="upload-icon">
                   <Upload size={20} />
                 </div>
                 <div className="upload-main">
                   <p className="upload-title">{fileName ? `已选择：${fileName}` : "上传简历文件"}</p>
                   <p className="upload-help">{isParsingResume ? "正在解析，请稍候..." : resumeParseStatus}</p>
-                  <input className="file-input" type="file" accept=".pdf,.docx,.txt" onChange={handleFileChange} disabled={isParsingResume} />
+                  <span className="upload-action">点击此处选择本地文件</span>
+                  <input id="resumeFile" className="file-input" type="file" accept=".pdf,.docx,.txt,.png,.jpg,.jpeg,.webp" onChange={handleFileChange} disabled={isParsingResume} />
                 </div>
-              </div>
+              </label>
 
               <div className="field">
                 <label className="field-label" htmlFor="resumeText">简历解析文本</label>
@@ -761,14 +583,17 @@ export default function Home() {
             </div>
           </section>
 
-          <section className="panel">
+        </aside>
+
+        <section className="column jd-column">
+          <section className="panel jd-panel">
             <div className="panel-header">
               <div>
                 <div className="panel-title-row">
                   <Target size={17} color="#1d4ed8" />
                   <h2 className="panel-title">目标岗位 JD</h2>
                 </div>
-                <p className="panel-kicker">直接粘贴招聘网站上的岗位描述即可。</p>
+                <p className="panel-kicker">粘贴 JD 文本，或上传岗位截图自动 OCR。</p>
               </div>
             </div>
             <div className="panel-body stack">
@@ -800,16 +625,17 @@ export default function Home() {
               </div>
               <div className="field">
                 <label className="field-label" htmlFor="jdText">JD 原文</label>
-                <div className="upload-box">
+                <label className="upload-box" htmlFor="jdFile">
                   <div className="upload-icon">
-                    <Upload size={20} />
+                    <ScanText size={20} />
                   </div>
                   <div className="upload-main">
-                    <p className="upload-title">{jdFileName ? `已选择：${jdFileName}` : "上传 JD 文件"}</p>
+                    <p className="upload-title">{jdFileName ? `已选择：${jdFileName}` : "上传 JD 文件或截图"}</p>
                     <p className="upload-help">{isParsingJd ? "正在解析，请稍候..." : jdParseStatus}</p>
-                    <input className="file-input" type="file" accept=".pdf,.docx,.txt" onChange={handleJdFileChange} disabled={isParsingJd} />
+                    <span className="upload-action">支持 PNG/JPG 截图 OCR</span>
+                    <input id="jdFile" className="file-input" type="file" accept=".pdf,.docx,.txt,.png,.jpg,.jpeg,.webp" onChange={handleJdFileChange} disabled={isParsingJd} />
                   </div>
-                </div>
+                </label>
                 <textarea
                   id="jdText"
                   className="textarea tall"
@@ -824,14 +650,14 @@ export default function Home() {
               </div>
               <button className="button primary full large" type="button" onClick={startAnalysis} disabled={!canAnalyze}>
                 <Sparkles size={17} />
-                {isParsingResume || isParsingJd ? "正在解析文件..." : isLoading ? "正在生成..." : "生成匹配评分和优化简历"}
+                {isParsingResume || isParsingJd ? "正在解析文件..." : isLoading ? "正在生成..." : stage === "analysis" ? "重新生成匹配评分" : "生成匹配评分"}
               </button>
             </div>
           </section>
-        </aside>
+        </section>
 
-        <section className="column">
-          <section className="panel">
+        <section className="column report-column">
+          <section className="panel report-panel">
             <div className="panel-header">
               <div>
                 <div className="panel-title-row">
@@ -843,16 +669,14 @@ export default function Home() {
             </div>
             <div className="panel-body">
               {stage === "input" ? (
-                <div className="empty-state">
-                  <ShieldCheck size={34} color="#1d4ed8" />
-                  <h2>准备生成第一份诊断报告</h2>
-                  <p>请先上传或粘贴简历，再上传或粘贴目标岗位 JD。系统会生成评分、差距、追问和优化版完整简历。</p>
-                </div>
+                <InitialReportPreview />
               ) : isLoading ? (
                 <LoadingSteps />
+              ) : resultSource === "error" ? (
+                <UnavailableState message={resultNotice} />
               ) : (
                 <div className="stack">
-                  <div className={`callout ${resultSource === "ai" ? "success" : "warning"}`}>
+                  <div className="callout success">
                     {resultNotice}
                   </div>
                   <div className="score-card">
@@ -890,10 +714,7 @@ export default function Home() {
                     </div>
                   )}
 
-                  <div className="section-divider" />
-                  <ProgressList dimensions={analysis.dimensions} />
-                  <div className="section-divider" />
-                  <KeywordCoverage analysis={analysis} />
+                  <QuickMatchSummary analysis={analysis} />
                   <div className="section-divider" />
                   <IssueList issues={analysis.issues} />
                 </div>
@@ -901,49 +722,7 @@ export default function Home() {
             </div>
           </section>
 
-          {stage === "result" ? (
-            <section className="panel">
-              <div className="panel-header">
-                <div>
-                  <div className="panel-title-row">
-                    <FileText size={17} color="#1d4ed8" />
-                    <h2 className="panel-title">优化版完整简历</h2>
-                  </div>
-                  <p className="panel-kicker">这是本 MVP 的主交付物，可直接复制或下载 Word。</p>
-                </div>
-              </div>
-              <div className="panel-body">
-                <div className="result-layout">
-                  <article className="resume-doc">{optimizedResume}</article>
-                  <aside className="result-side">
-                    <button className="button primary full" type="button" onClick={copyResume}>
-                      <Copy size={16} />
-                      {copied ? "已复制" : "复制简历"}
-                    </button>
-                    <button className="button secondary full" type="button" onClick={() => downloadDocx(optimizedResume)}>
-                      <Download size={16} />
-                      下载 Word
-                    </button>
-                    <button className="button secondary full" type="button" onClick={copyShareLink}>
-                      <Share2 size={16} />
-                      {shareCopied ? "链接已复制" : "分享结果链接"}
-                    </button>
-                    <button className="button ghost full" type="button" onClick={() => setStage("analysis")}>
-                      <RotateCcw size={16} />
-                      修改追问答案
-                    </button>
-                    <div className="callout warning">
-                      分享页默认隐藏手机号、邮箱。Word 下载会使用 ATS 友好的单栏模板生成。
-                    </div>
-                  </aside>
-                </div>
-              </div>
-            </section>
-          ) : null}
-        </section>
-
-        <aside className="column">
-          <section className="panel">
+          <section className="panel action-panel">
             <div className="panel-header">
               <div>
                 <div className="panel-title-row">
@@ -955,13 +734,11 @@ export default function Home() {
             </div>
             <div className="panel-body">
               {stage === "input" ? (
-                <div className="empty-state">
-                  <AlertTriangle size={30} color="#d97706" />
-                  <h2>等待分析</h2>
-                  <p>生成当前匹配评分后，这里会展示高优先级问题、补充追问和生成优化版简历入口。</p>
-                </div>
+                <InitialActionPreview />
               ) : isLoading ? (
                 <LoadingSteps />
+              ) : resultSource === "error" ? (
+                <UnavailableState message="模型恢复后，系统会继续基于同一份简历和 JD 生成追问与优化版简历。" />
               ) : (
                 <div className="stack">
                   <TaskList tasks={analysis.tasks} />
@@ -969,7 +746,7 @@ export default function Home() {
                   <QuestionList questions={analysis.questions} answers={answers} setAnswers={setAnswers} />
                   <button className="button primary full large" type="button" onClick={generateResume} disabled={isLoading}>
                     <Sparkles size={17} />
-                    {isLoading ? "正在生成..." : "生成标准优化版简历"}
+                    {isLoading ? "正在生成..." : "生成并跳转到对照页"}
                   </button>
                   <button className="button secondary full" type="button" onClick={skipQuestionsAndGenerate} disabled={isLoading}>
                     跳过追问，直接生成
@@ -978,9 +755,92 @@ export default function Home() {
               )}
             </div>
           </section>
-        </aside>
+        </section>
       </section>
     </main>
+  );
+}
+
+function InitialReportPreview() {
+  return (
+    <div className="initial-preview">
+      <div className="preview-score-card">
+        <div className="preview-score-icon">
+          <ShieldCheck size={22} />
+        </div>
+        <div>
+          <p className="preview-title">等待生成评分</p>
+          <p className="preview-text">完成左侧两栏输入后，会显示当前分、优化后预计分和最不匹配的关键点。</p>
+        </div>
+      </div>
+      <div className="preview-grid">
+        <div className="preview-item">
+          <span>当前匹配度</span>
+          <strong>--</strong>
+        </div>
+        <div className="preview-item">
+          <span>优化后预计</span>
+          <strong>--</strong>
+        </div>
+      </div>
+      <div className="compact-list">
+        <span>关键词覆盖</span>
+        <span>项目相关性</span>
+        <span>ATS 可读性</span>
+      </div>
+    </div>
+  );
+}
+
+function InitialActionPreview() {
+  return (
+    <div className="initial-preview">
+      <div className="preview-score-card amber">
+        <div className="preview-score-icon">
+          <Sparkles size={22} />
+        </div>
+        <div>
+          <p className="preview-title">生成后直接进入最终简历页</p>
+          <p className="preview-text">系统会先问 3-5 个关键问题，再生成左右对照的优化版完整简历。</p>
+        </div>
+      </div>
+      <div className="output-preview">
+        <span>项目经历结构化</span>
+        <span>关键改动标黄</span>
+        <span>支持下载 Word</span>
+      </div>
+    </div>
+  );
+}
+
+function QuickMatchSummary({ analysis }: { analysis: Analysis }) {
+  return (
+    <div className="quick-match">
+      <div>
+        <p className="field-label">匹配点</p>
+        <div className="chips">
+          {analysis.matchedKeywords.slice(0, 4).map((keyword) => (
+            <span className="chip success" key={keyword}>{keyword}</span>
+          ))}
+        </div>
+      </div>
+      <div>
+        <p className="field-label">不匹配 / 待确认</p>
+        <div className="chips">
+          {analysis.missingKeywords.slice(0, 4).map((keyword) => (
+            <span className="chip warning" key={keyword}>{keyword}</span>
+          ))}
+        </div>
+      </div>
+      <div className="compact-issues">
+        {analysis.issues.slice(0, 2).map((issue) => (
+          <div className="compact-issue" key={issue.title}>
+            <strong>{issue.title}</strong>
+            <span>{issue.text}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -998,53 +858,22 @@ function LoadingSteps() {
   );
 }
 
-function ProgressList({ dimensions }: { dimensions: Dimension[] }) {
+function UnavailableState({ message }: { message: string }) {
   return (
-    <div className="progress-list">
-      {dimensions.map((dimension) => (
-        <div className="progress-item" key={dimension.label}>
-          <div className="progress-head">
-            <span>{dimension.label}</span>
-            <strong>{dimension.value}</strong>
-          </div>
-          <div className="progress-track">
-            <div
-              className="progress-fill"
-              style={{ width: `${dimension.value}%`, "--bar-color": getColor(dimension.value) } as CSSProperties}
-            />
-          </div>
+    <div className="initial-preview">
+      <div className="preview-score-card amber">
+        <div className="preview-score-icon">
+          <AlertTriangle size={22} />
         </div>
-      ))}
-    </div>
-  );
-}
-
-function KeywordCoverage({ analysis }: { analysis: Analysis }) {
-  return (
-    <div className="stack">
-      <div>
-        <p className="field-label">已匹配关键词</p>
-        <div className="chips">
-          {analysis.matchedKeywords.map((keyword) => (
-            <span className="chip success" key={keyword}>{keyword}</span>
-          ))}
+        <div>
+          <p className="preview-title">AI 模型暂时无法使用</p>
+          <p className="preview-text">{message}</p>
         </div>
       </div>
-      <div>
-        <p className="field-label">缺失或待确认关键词</p>
-        <div className="chips">
-          {analysis.missingKeywords.map((keyword) => (
-            <span className="chip warning" key={keyword}>{keyword}</span>
-          ))}
-        </div>
-      </div>
-      <div>
-        <p className="field-label">低相关表达</p>
-        <div className="chips">
-          {analysis.lowRelevanceKeywords.map((keyword) => (
-            <span className="chip gray" key={keyword}>{keyword}</span>
-          ))}
-        </div>
+      <div className="compact-list">
+        <span>不会生成假评分</span>
+        <span>不会生成假简历</span>
+        <span>请稍后重试</span>
       </div>
     </div>
   );

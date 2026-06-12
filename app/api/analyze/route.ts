@@ -82,6 +82,50 @@ const defaultQuestions: Question[] = [
   },
 ];
 
+type TermCategory = "hardSkill" | "responsibility" | "domain" | "tool" | "title" | "hardRequirement";
+
+type TermDefinition = {
+  label: string;
+  category: TermCategory;
+  weight: number;
+  patterns: RegExp[];
+};
+
+type EvaluatedTerm = TermDefinition & {
+  matched: boolean;
+};
+
+const termDefinitions: TermDefinition[] = [
+  { label: "AI 产品", category: "domain", weight: 3, patterns: [/AI\s*产品/i, /人工智能产品/] },
+  { label: "大模型", category: "hardSkill", weight: 3, patterns: [/大模型|大语言模型|LLM|GPT|DeepSeek|OpenAI/i] },
+  { label: "智能体/Agent", category: "hardSkill", weight: 3, patterns: [/智能体|Agent/i] },
+  { label: "RAG", category: "hardSkill", weight: 3, patterns: [/RAG|检索增强|向量数据库|Embedding/i] },
+  { label: "Prompt", category: "hardSkill", weight: 2, patterns: [/Prompt|提示词|Few-Shot|CoT/i] },
+  { label: "Dify/Coze", category: "tool", weight: 2, patterns: [/Dify|Coze/i] },
+  { label: "SQL", category: "hardSkill", weight: 3, patterns: [/\bSQL\b|MySQL|PostgreSQL|数据库查询/i] },
+  { label: "Excel", category: "tool", weight: 1.5, patterns: [/Excel|表格/i] },
+  { label: "BI 工具", category: "tool", weight: 2.5, patterns: [/\bBI\b|Tableau|Power\s?BI|FineBI|帆软/i] },
+  { label: "数据分析", category: "hardSkill", weight: 3, patterns: [/数据分析|指标分析|经营分析|用户分析/] },
+  { label: "数据看板", category: "responsibility", weight: 2, patterns: [/数据看板|驾驶舱|报表/] },
+  { label: "B 端/SaaS", category: "domain", weight: 3, patterns: [/B\s*端|B端|SaaS|企业服务|企业级/i] },
+  { label: "企业后台", category: "domain", weight: 2.5, patterns: [/企业后台|管理后台|内部工具|管理平台/] },
+  { label: "工作流", category: "domain", weight: 2, patterns: [/工作流|流程引擎|审批流|SOP/i] },
+  { label: "需求分析", category: "responsibility", weight: 2.5, patterns: [/需求分析|需求调研|需求梳理|需求挖掘/] },
+  { label: "产品规划", category: "responsibility", weight: 2.5, patterns: [/产品规划|路线图|版本规划|产品策略/] },
+  { label: "功能设计", category: "responsibility", weight: 2, patterns: [/功能设计|方案设计|流程设计|交互设计/] },
+  { label: "原型/PRD", category: "responsibility", weight: 2, patterns: [/原型|PRD|需求文档|产品文档/] },
+  { label: "项目推进", category: "responsibility", weight: 2, patterns: [/项目推进|项目管理|里程碑|交付|上线/] },
+  { label: "跨部门协作", category: "responsibility", weight: 1.5, patterns: [/跨部门|协同|协作|拉通|推动/] },
+  { label: "用户调研", category: "responsibility", weight: 2, patterns: [/用户调研|访谈|问卷|用户旅程/] },
+  { label: "竞品分析", category: "responsibility", weight: 1.5, patterns: [/竞品分析|市场分析|行业分析/] },
+  { label: "测试迭代", category: "responsibility", weight: 2, patterns: [/测试|验证|迭代|优化|A\/B|AB测试/i] },
+  { label: "量化成果", category: "responsibility", weight: 2, patterns: [/%|提升|降低|减少|增长|缩短|节省|准确率|转化率|满意度|采纳率/] },
+  { label: "产品经理", category: "title", weight: 2, patterns: [/产品经理|Product\s*Manager/i] },
+  { label: "解决方案", category: "title", weight: 1.5, patterns: [/解决方案|售前|方案经理/] },
+];
+
+const genericTermTriggers = /产品|运营|销售|市场|数据|算法|设计|研发|测试|项目|客户|用户|业务|管理|分析|增长|转化|内容|交付|系统|平台|模型|智能|AI|SaaS|CRM|ERP/i;
+
 export async function POST(request: Request) {
   const body = (await request.json().catch(() => ({}))) as AnalyzeRequest;
   const resumeText = body.resumeText?.trim() || "";
@@ -93,13 +137,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "缺少简历或 JD 文本" }, { status: 400 });
   }
 
-  const fallbackAnalysis = buildFallbackAnalysis(resumeText, jdText);
-  const fallbackResume = buildFallbackOptimizedResume({
+  const deterministicAnalysis = buildDeterministicAnalysis({
     resumeText,
-    targetCompany: body.targetCompany || "",
+    jdText,
     targetRole: body.targetRole || "",
-    answers,
-    analysis: fallbackAnalysis,
   });
 
   const apiKey = process.env.AI_API_KEY;
@@ -107,43 +148,69 @@ export async function POST(request: Request) {
   const model = process.env.AI_MODEL || "deepseek-chat";
 
   if (!apiKey) {
-    return NextResponse.json({
-      source: "fallback",
-      notice: "未配置 AI_API_KEY，当前使用本地演示结果。",
-      analysis: fallbackAnalysis,
-      optimizedResume: mode === "generate" ? fallbackResume : undefined,
-    });
+    return NextResponse.json({ error: "AI 模型未配置，当前功能无法使用。请配置 AI_API_KEY 后重试。" }, { status: 503 });
   }
 
   try {
-    const aiResult = await callTextModel({
-      apiKey,
-      baseUrl,
-      model,
-      payload: {
-        mode,
-        resumeText,
-        jdText,
-        targetCompany: body.targetCompany || "",
-        targetRole: body.targetRole || "",
-        answers,
-      },
-    });
+    let aiResult: { analysis?: unknown; optimizedResume?: unknown } | null = null;
+    let optimizedResume: string | undefined;
+    let repairHint = "";
 
-    const analysis = normalizeAnalysis(aiResult.analysis, fallbackAnalysis);
-    const rawOptimizedResume =
-      mode === "generate" && typeof aiResult.optimizedResume === "string" && aiResult.optimizedResume.trim()
-        ? aiResult.optimizedResume.trim()
-        : mode === "generate"
-          ? fallbackResume
-          : undefined;
-    const optimizedResume = rawOptimizedResume
-      ? sanitizeOptimizedResume({
-          optimizedResume: rawOptimizedResume,
+    for (let attempt = 0; attempt < (mode === "generate" ? 2 : 1); attempt += 1) {
+      aiResult = await callTextModel({
+        apiKey,
+        baseUrl,
+        model,
+        payload: {
+          mode,
           resumeText,
+          jdText,
+          targetCompany: body.targetCompany || "",
+          targetRole: body.targetRole || "",
           answers,
-        })
-      : undefined;
+          deterministicAnalysis,
+          repairHint,
+        },
+      });
+
+      const rawOptimizedResume = mode === "generate" ? extractOptimizedResume(aiResult) : undefined;
+
+      if (mode !== "generate") {
+        break;
+      }
+
+      if (!rawOptimizedResume) {
+        repairHint = "上一次没有返回 optimizedResume。请返回一份完整中文简历，并严格使用 optimizedResume 作为字段名。";
+        continue;
+      }
+
+      const sanitizedResume = sanitizeOptimizedResume({
+        optimizedResume: rawOptimizedResume,
+        resumeText,
+        answers,
+      });
+
+      try {
+        if (!sanitizedResume || sanitizedResume.length < 120) {
+          throw new Error("模型返回的优化版简历无效，正文长度不足");
+        }
+        assertOptimizedResumeFormat(sanitizedResume);
+        optimizedResume = sanitizedResume;
+        break;
+      } catch (formatError) {
+        const message = formatError instanceof Error ? formatError.message : "项目经历格式不合格";
+        repairHint = `上一次 optimizedResume 未通过格式校验：${message}。请重新生成完整简历，项目经历中每个项目必须有 4-6 条小点，每条格式为“4-9 个中文字符标签：40-150 个中文字符正文”。不要解释原因，只返回 JSON。`;
+      }
+    }
+
+    if (!aiResult) {
+      throw new Error("模型返回为空");
+    }
+
+    const analysis = normalizeAnalysis(aiResult.analysis, deterministicAnalysis);
+    if (mode === "generate" && !optimizedResume) {
+      throw new Error("模型未返回优化版简历");
+    }
 
     return NextResponse.json({
       source: "ai",
@@ -154,12 +221,7 @@ export async function POST(request: Request) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "模型调用失败";
 
-    return NextResponse.json({
-      source: "fallback",
-      notice: `模型调用失败，当前使用本地演示结果：${message}`,
-      analysis: fallbackAnalysis,
-      optimizedResume: mode === "generate" ? fallbackResume : undefined,
-    });
+    return NextResponse.json({ error: `AI 模型调用失败，当前功能无法使用：${message}` }, { status: 503 });
   }
 }
 
@@ -172,7 +234,10 @@ async function callTextModel({
   apiKey: string;
   baseUrl: string;
   model: string;
-  payload: Required<Pick<AnalyzeRequest, "mode" | "resumeText" | "jdText" | "targetCompany" | "targetRole" | "answers">>;
+  payload: Required<Pick<AnalyzeRequest, "mode" | "resumeText" | "jdText" | "targetCompany" | "targetRole" | "answers">> & {
+    deterministicAnalysis: Analysis;
+    repairHint?: string;
+  };
 }) {
   const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
@@ -182,8 +247,8 @@ async function callTextModel({
     },
     body: JSON.stringify({
       model,
-      temperature: 0.2,
-      max_tokens: payload.mode === "generate" ? 4096 : 2200,
+      temperature: 0,
+      max_tokens: payload.mode === "generate" ? 6000 : 2600,
       response_format: { type: "json_object" },
       messages: [
         {
@@ -192,7 +257,21 @@ async function callTextModel({
         },
         {
           role: "user",
-          content: JSON.stringify(payload),
+          content: JSON.stringify({
+            ...payload,
+            scoringLock: {
+              currentScore: payload.deterministicAnalysis.currentScore,
+              optimizedScore: payload.deterministicAnalysis.optimizedScore,
+              scoreLabel: payload.deterministicAnalysis.scoreLabel,
+              recommendation: payload.deterministicAnalysis.recommendation,
+              isTransition: payload.deterministicAnalysis.isTransition,
+              dimensions: payload.deterministicAnalysis.dimensions,
+              matchedKeywords: payload.deterministicAnalysis.matchedKeywords,
+              missingKeywords: payload.deterministicAnalysis.missingKeywords,
+              lowRelevanceKeywords: payload.deterministicAnalysis.lowRelevanceKeywords,
+            },
+            repairHint: payload.repairHint || undefined,
+          }),
         },
       ],
     }),
@@ -229,7 +308,9 @@ function buildSystemPrompt(mode: "analysis" | "generate") {
 8. 不要把“数据看板/反馈整理”推断成 SQL、BI、Tableau、Power BI。
 9. 不要把“知识库/智能客服”推断成大模型、RAG、Agent、LLM，除非原简历或追问答案明确写到。
 10. 不要编造任何百分比、人数、金额、时长、效率提升数值。
-11. 必须返回 JSON，不要输出 Markdown，不要输出解释性前后缀。
+11. 用户消息里的 scoringLock 是固定评分结果，analysis.currentScore、optimizedScore、scoreLabel、recommendation、isTransition、dimensions、matchedKeywords、missingKeywords、lowRelevanceKeywords 必须逐字照抄，不得重新打分。
+12. 评分解释必须围绕这套固定规则：JD 关键词覆盖 35%，工作/项目经历相关性 25%，技能匹配度 20%，ATS 格式友好度 10%，年限/硬性门槛匹配 10%。
+13. 必须返回 JSON，不要输出 Markdown，不要输出解释性前后缀。
 
 JSON 顶层结构：
 {
@@ -255,7 +336,59 @@ JSON 顶层结构：
   }${mode === "generate" ? ',\n  "optimizedResume": string' : ""}
 }
 
-${mode === "generate" ? "optimizedResume 必须是一份完整的中文简历文本，包含个人简介、核心技能、工作经历、项目经历、教育经历等适用部分；没有证据的 JD 关键词只能放在分析和追问里，不能放进 optimizedResume。" : "questions 必须包含 3-5 个最能提升匹配度的追问。"}`;
+${mode === "generate" ? `optimizedResume 必须是一份完整的中文简历文本，包含个人简介、核心技能、工作经历、项目经历、教育经历等适用部分。
+optimizedResume 必须是 JSON 顶层字段，字段值必须是字符串，不要把简历拆成对象或数组。
+整体结构参考优秀中文产品经理简历：顶部保留姓名和联系方式；个人简介用 3-5 条概括年限、方向、核心能力、可证明成果；核心技能按 JD 高频能力聚合；工作经历保持公司、岗位、时间；项目经历是重点。
+项目经历必须结构清晰，每个项目优先使用：
+项目名称 | 岗位名称/责任角色 | 时间段
+- 项目背景：具体内容
+- 产品规划：具体内容
+- 数据准备：具体内容
+- 方案设计：具体内容
+- 测试迭代：具体内容
+- 落地成果：具体内容
+每个项目不得少于 4 条小点，通常 4-6 条，最多 6 条。
+每条小点必须输出“标签：内容”的纯文本格式；标签必须是 4-9 个中文字符，正文内容必须是 40-150 个中文字符。
+可用标签包括：项目背景、需求分析、产品规划、数据准备、方案设计、测试验证、测试迭代、工程护栏、运营优化、协作推进、售前支持、落地成果、场景泛化。
+同一个项目内标签不要重复；如果原简历只有 1 个项目，也必须把这个项目扩展成 4-6 条结构化小点，但不能编造新项目。
+每条小点要包含动作、方法/工具、协作对象或业务结果中的至少两类信息；有量化指标时只能使用原简历或追问答案已出现的数字。
+没有证据的 JD 关键词只能放在分析和追问里，不能放进 optimizedResume；项目名称、岗位名称、时间段缺失时保留原文，不要补造。` : "questions 必须包含 3-5 个最能提升匹配度的追问。"}`;
+}
+
+function extractOptimizedResume(result: unknown) {
+  if (!isRecord(result)) return undefined;
+  if (typeof result.optimizedResume === "string" && result.optimizedResume.trim()) {
+    return result.optimizedResume.trim();
+  }
+
+  const candidates = ["optimized_resume", "resume", "optimizedText", "optimized_text", "简历", "优化版简历"];
+  for (const key of candidates) {
+    const value = result[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  for (const key of candidates) {
+    const value = result[key];
+    const flattened = flattenResumeValue(value);
+    if (flattened) return flattened;
+  }
+
+  return undefined;
+}
+
+function flattenResumeValue(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (Array.isArray(value)) {
+    const lines = value.map(flattenResumeValue).filter((item): item is string => Boolean(item));
+    return lines.length ? lines.join("\n") : undefined;
+  }
+  if (isRecord(value)) {
+    const lines = Object.values(value).map(flattenResumeValue).filter((item): item is string => Boolean(item));
+    return lines.length ? lines.join("\n") : undefined;
+  }
+  return undefined;
 }
 
 function sanitizeOptimizedResume({
@@ -291,9 +424,9 @@ function normalizeGeneratedResumeText(text: string, evidenceText: string) {
 
 function stripPlaceholderClauses(line: string) {
   return line
-    .replace(/[（(][^）)]*(?:请补充|待补充|暂无|需确认|待确认|具体[^）)]*确认)[^）)]*[）)]/g, "")
+    .replace(/[（(][^）)]*(?:请补充|待补充|暂无|需确认|待确认|留空|具体[^）)]*确认)[^）)]*[）)]/g, "")
     .replace(/[（(][^）)]*建议补充[^）)]*[）)]/g, "")
-    .replace(/[，。；,;]?[^，。；,;\n]*(?:请补充|待补充|暂无|需确认|待确认|建议补充)[^，。；,;\n]*[，。；,;]?/g, "")
+    .replace(/[，。；,;]?[^，。；,;\n]*(?:请补充|待补充|暂无|需确认|待确认|建议补充|可补充|留空)[^，。；,;\n]*[，。；,;]?/g, "")
     .trimEnd();
 }
 
@@ -322,7 +455,7 @@ function stripUnsupportedOutcomeClauses(line: string, evidenceText: string) {
 function unsupportedLineReason(line: string, evidenceText: string) {
   const trimmed = line.trim();
   if (!trimmed) return null;
-  if (/请补充|待补充|暂无|无相关经历|需确认|待确认|建议补充|\(请补充\)|（请补充）/.test(trimmed)) {
+  if (/请补充|待补充|暂无|无相关经历|需确认|待确认|建议补充|可补充|留空|\(请补充\)|（请补充）/.test(trimmed)) {
     return "占位内容";
   }
 
@@ -334,7 +467,7 @@ function unsupportedLineReason(line: string, evidenceText: string) {
     { label: "Agent", pattern: /\bAgent\b|智能体/i },
     { label: "Axure", pattern: /\bAxure\b/i },
     { label: "Jira", pattern: /\bJira\b/i },
-    { label: "敏捷开发", pattern: /敏捷开发|Scrum/i },
+    { label: "敏捷管理", pattern: /敏捷开发|敏捷管理|Scrum/i },
     { label: "查询日志", pattern: /查询日志|埋点日志|行为日志/ },
     { label: "准确率", pattern: /准确率/ },
     { label: "转化率", pattern: /转化率/ },
@@ -356,7 +489,7 @@ function unsupportedLineReason(line: string, evidenceText: string) {
 
 function removePlaceholderSections(lines: string[]) {
   const headings = new Set(["个人简介", "核心技能", "技能", "专业技能", "工作经历", "项目经历", "教育经历", "实习经历", "校园经历", "证书", "证书与技能", "补充建议"]);
-  const withoutPlaceholders = lines.filter((line) => !/请补充|待补充|暂无|无相关经历|需确认|待确认|建议补充|\(请补充\)|（请补充）/.test(line.trim()));
+  const withoutPlaceholders = lines.filter((line) => !/请补充|待补充|暂无|无相关经历|需确认|待确认|建议补充|可补充|留空|\(请补充\)|（请补充）/.test(line.trim()));
 
   return withoutPlaceholders.filter((line, index) => {
     const trimmed = line.trim();
@@ -371,6 +504,70 @@ function removePlaceholderSections(lines: string[]) {
     const sectionEnd = nextHeadingIndex === -1 ? withoutPlaceholders.length : nextHeadingIndex;
     return withoutPlaceholders.slice(index + 1, sectionEnd).some((item) => item.trim().startsWith("-"));
   });
+}
+
+function assertOptimizedResumeFormat(optimizedResume: string) {
+  const projectSection = extractProjectSection(optimizedResume);
+  if (!projectSection) return;
+
+  const projects = splitProjectBlocks(projectSection);
+  const invalidProject = projects.find((project) => {
+    const bullets = project.lines.filter((line) => /^[-•]\s*/.test(line.trim()));
+    if (bullets.length < 4 || bullets.length > 6) {
+      project.error = `项目小点数量为 ${bullets.length} 条`;
+      return true;
+    }
+
+    return bullets.some((line) => {
+      const match = line.trim().match(/^[-•]\s*([\u4e00-\u9fa5]{4,9})[：:]\s*(.+)$/);
+      if (!match) {
+        project.error = `小点格式错误：${line.trim().slice(0, 40)}`;
+        return true;
+      }
+      const contentLength = countChineseContentLength(match[2]);
+      if (contentLength < 40 || contentLength > 150) {
+        project.error = `“${match[1]}”正文长度为 ${contentLength} 字`;
+        return true;
+      }
+      return false;
+    });
+  });
+
+  if (invalidProject) {
+    throw new Error(`模型返回的项目经历格式不合格：${invalidProject.title}，${invalidProject.error || "小点不满足要求"}`);
+  }
+}
+
+function extractProjectSection(text: string) {
+  const lines = text.split("\n");
+  const startIndex = lines.findIndex((line) => /^项目经历\s*[：:]?\s*$/.test(line.trim()));
+  if (startIndex === -1) return null;
+  const endIndex = lines.findIndex((line, index) => index > startIndex && isResumeSectionHeading(line));
+  return lines.slice(startIndex + 1, endIndex === -1 ? lines.length : endIndex).filter((line) => line.trim());
+}
+
+function isResumeSectionHeading(line: string) {
+  return /^(个人简介|个人总结|求职方向|核心技能|专业技能|技能|工作经历|项目经历|实习经历|教育经历|校园经历|证书|补充建议)\s*[：:]?\s*$/.test(line.trim());
+}
+
+function splitProjectBlocks(lines: string[]) {
+  const projects: Array<{ title: string; lines: string[]; error?: string }> = [];
+  let current: { title: string; lines: string[]; error?: string } | null = null;
+
+  for (const line of lines) {
+    if (!/^[-•]\s*/.test(line.trim())) {
+      current = { title: line.trim(), lines: [] };
+      projects.push(current);
+      continue;
+    }
+    current?.lines.push(line);
+  }
+
+  return projects.filter((project) => project.lines.length);
+}
+
+function countChineseContentLength(text: string) {
+  return text.replace(/\s+/g, "").length;
 }
 
 function findUnsupportedMetric(line: string, evidenceText: string) {
@@ -393,38 +590,21 @@ function escapeRegExp(value: string) {
 
 function normalizeAnalysis(input: unknown, fallback: Analysis): Analysis {
   const item = isRecord(input) ? input : {};
-  const currentScore = clampNumber(item.currentScore, fallback.currentScore);
-  const optimizedScore = Math.max(currentScore, clampNumber(item.optimizedScore, fallback.optimizedScore));
 
   return {
-    currentScore,
-    optimizedScore,
-    scoreLabel: stringOr(item.scoreLabel, fallback.scoreLabel),
-    recommendation: stringOr(item.recommendation, fallback.recommendation),
-    isTransition: currentScore < 65 || item.isTransition === true,
-    dimensions: normalizeDimensions(item.dimensions, fallback.dimensions),
-    matchedKeywords: normalizeStrings(item.matchedKeywords, fallback.matchedKeywords),
-    missingKeywords: normalizeStrings(item.missingKeywords, fallback.missingKeywords),
-    lowRelevanceKeywords: normalizeStrings(item.lowRelevanceKeywords, fallback.lowRelevanceKeywords),
+    currentScore: fallback.currentScore,
+    optimizedScore: fallback.optimizedScore,
+    scoreLabel: fallback.scoreLabel,
+    recommendation: fallback.recommendation,
+    isTransition: fallback.isTransition,
+    dimensions: fallback.dimensions,
+    matchedKeywords: fallback.matchedKeywords,
+    missingKeywords: fallback.missingKeywords,
+    lowRelevanceKeywords: fallback.lowRelevanceKeywords,
     issues: normalizeIssues(item.issues, fallback.issues),
     tasks: normalizeTasks(item.tasks, fallback.tasks),
     questions: normalizeQuestions(item.questions, fallback.questions),
   };
-}
-
-function normalizeDimensions(input: unknown, fallback: Dimension[]) {
-  if (!Array.isArray(input)) return fallback;
-  const list = input
-    .map((item) => {
-      if (!isRecord(item)) return null;
-      return {
-        label: stringOr(item.label, ""),
-        value: clampNumber(item.value, 0),
-      };
-    })
-    .filter((item): item is Dimension => Boolean(item?.label));
-
-  return list.length ? list.slice(0, 5) : fallback;
 }
 
 function normalizeIssues(input: unknown, fallback: Issue[]) {
@@ -481,17 +661,6 @@ function normalizeQuestions(input: unknown, fallback: Question[]): Question[] {
   return list.length ? list.slice(0, 5) : fallback;
 }
 
-function normalizeStrings(input: unknown, fallback: string[]) {
-  if (!Array.isArray(input)) return fallback;
-  const list = input.filter((item): item is string => typeof item === "string" && Boolean(item.trim())).map((item) => item.trim());
-  return list.length ? list.slice(0, 8) : fallback;
-}
-
-function clampNumber(input: unknown, fallback: number) {
-  if (typeof input !== "number" || Number.isNaN(input)) return fallback;
-  return Math.max(0, Math.min(100, Math.round(input)));
-}
-
 function stringOr(input: unknown, fallback: string) {
   return typeof input === "string" && input.trim() ? input.trim() : fallback;
 }
@@ -500,97 +669,322 @@ function isRecord(input: unknown): input is Record<string, unknown> {
   return Boolean(input && typeof input === "object" && !Array.isArray(input));
 }
 
-function buildFallbackAnalysis(resumeText: string, jdText: string): Analysis {
-  const resume = resumeText.toLowerCase();
-  const jd = jdText.toLowerCase();
-  const hasAi = /ai|大模型|智能|自动化|客服|助手|agent|rag|llm/.test(resume) || resume.includes("知识库");
-  const hasB2b = /b端|b 端|saas|企业|后台|管理平台|内部工具|客户管理/.test(resume);
-  const hasData = /sql|数据|excel|bi|看板|指标|转化率|增长/.test(resume);
-  const hasMetrics = /%|提升|降低|减少|增长|效率|成本/.test(resume);
-  const jdAi = /ai|大模型|agent|rag|智能/.test(jd);
-  const jdData = /sql|数据|bi|看板|指标/.test(jd);
-
-  let currentScore = 54;
-  if (hasAi) currentScore += 10;
-  if (hasB2b) currentScore += 12;
-  if (hasData) currentScore += 9;
-  if (hasMetrics) currentScore += 7;
-  if (resume.length > 260) currentScore += 5;
-  if (!jdAi) currentScore += 4;
-  if (!jdData) currentScore += 3;
-  currentScore = Math.min(88, currentScore);
-
-  const optimizedScore = Math.min(94, currentScore + (currentScore < 65 ? 18 : 13));
+function buildDeterministicAnalysis({
+  resumeText,
+  jdText,
+  targetRole,
+}: {
+  resumeText: string;
+  jdText: string;
+  targetRole: string;
+}) {
+  const evaluatedTerms = evaluateJdTerms(jdText, resumeText, targetRole);
+  const matchedTerms = evaluatedTerms.filter((term) => term.matched);
+  const missingTerms = evaluatedTerms.filter((term) => !term.matched);
+  const hardSkillTerms = evaluatedTerms.filter((term) => term.category === "hardSkill" || term.category === "tool");
+  const experienceTerms = evaluatedTerms.filter((term) => term.category === "responsibility" || term.category === "domain" || term.category === "title");
+  const hardRequirementScore = scoreHardRequirements(resumeText, jdText, targetRole);
+  const keywordScore = weightedCoverage(evaluatedTerms);
+  const skillScore = hardSkillTerms.length ? weightedCoverage(hardSkillTerms) : keywordScore;
+  const experienceScore = scoreExperienceRelevance(experienceTerms, resumeText, targetRole);
+  const atsScore = scoreAtsFormat(resumeText);
+  const currentScore = clampScore(Math.round(keywordScore * 0.35 + experienceScore * 0.25 + skillScore * 0.2 + atsScore * 0.1 + hardRequirementScore * 0.1));
+  const missingHighWeight = missingTerms.filter((term) => term.weight >= 2.5).length;
+  const optimizationGain = currentScore < 60 ? 16 : currentScore < 75 ? 12 : 8;
+  const optimizedScore = clampScore(Math.min(95, currentScore + optimizationGain + Math.min(5, missingHighWeight)));
   const isTransition = currentScore < 65;
+  const dimensions: Dimension[] = [
+    { label: "JD 关键词覆盖", value: keywordScore },
+    { label: "工作/项目经历相关性", value: experienceScore },
+    { label: "技能匹配度", value: skillScore },
+    { label: "ATS 格式友好度", value: atsScore },
+    { label: "年限/硬性门槛匹配", value: hardRequirementScore },
+  ];
+  const matchedKeywords = matchedTerms.map((term) => term.label).slice(0, 8);
+  const missingKeywords = missingTerms
+    .filter((term) => term.weight >= 2)
+    .map((term) => term.label)
+    .slice(0, 8);
+  const lowRelevanceKeywords = findLowRelevanceKeywords(resumeText, jdText);
 
   return {
     currentScore,
     optimizedScore,
-    scoreLabel: isTransition ? "匹配较弱" : currentScore >= 80 ? "较匹配" : "中等匹配",
-    recommendation: isTransition ? "建议先补充真实经历，再作为转型尝试投递" : "建议使用优化版简历后投递",
+    scoreLabel: getScoreLabel(currentScore),
+    recommendation: getRecommendation(currentScore, missingKeywords),
     isTransition,
-    dimensions: [
-      { label: "JD 关键词覆盖", value: Math.min(92, currentScore + (hasAi ? 5 : -6)) },
-      { label: "工作/项目经历相关性", value: Math.min(90, currentScore + (hasB2b ? 8 : -4)) },
-      { label: "技能匹配度", value: Math.min(88, currentScore + (hasData ? 5 : -8)) },
-      { label: "ATS 格式友好度", value: 84 },
-      { label: "年限/硬性门槛匹配", value: 72 },
-    ].map((item) => ({ ...item, value: Math.max(36, item.value) })),
-    matchedKeywords: [hasB2b ? "企业后台" : "产品规划", "跨部门协作", hasAi ? "智能工具" : "需求分析", hasData ? "数据反馈" : "原型设计"],
-    missingKeywords: [!hasAi ? "大模型/Agent" : "RAG", !hasData ? "SQL/BI" : "量化指标", "ATS 关键词", "业务结果"],
-    lowRelevanceKeywords: ["内容运营", "活动执行", "通用沟通"],
-    issues: [
-      {
-        title: hasAi ? "AI 相关经历需要更贴近 JD 语言" : "AI 产品经验没有形成明确证据",
-        text: hasAi
-          ? "简历里有智能客服或自动化相关经历，但还没有自然覆盖大模型、智能助手、AI 产品规划等高权重词。"
-          : "JD 强调大模型、Agent 或 AI 产品经验，但当前简历缺少可以直接识别的 AI 项目证据。",
-        severity: "high",
-      },
-      {
-        title: hasData ? "数据分析结果表达偏弱" : "数据分析能力缺少证据",
-        text: hasData ? "简历提到反馈和数据，但没有把工具、指标、业务结果写清楚。" : "JD 多次提到数据分析、SQL 或 BI，但简历没有明确工具和分析场景。",
-        severity: "high",
-      },
-      {
-        title: hasB2b ? "B 端经验可以进一步前置" : "B 端/SaaS 相关表达不足",
-        text: hasB2b ? "企业后台和客户管理经历可转译为 B 端产品经验，建议放入个人简介和核心技能。" : "JD 要求企业客户场景或 SaaS 产品经验，当前简历没有明显对应内容。",
-        severity: "medium",
-      },
-    ],
-    tasks: [
-      { priority: "high", title: "把最相关项目前置", text: "将智能客服、企业后台、自动化工具等经历放到个人简介和项目经历前半部分。" },
-      { priority: "medium", title: "补充真实工具与指标", text: "只有在用户确认后，才把 SQL、BI、效率提升、转化率等内容写入优化版简历。" },
-      { priority: "quick", title: "改成 ATS 友好结构", text: "使用单栏、标准标题、清晰技能区，避免复杂表格和图片化文字。" },
-    ],
-    questions: defaultQuestions,
+    dimensions,
+    matchedKeywords: matchedKeywords.length ? matchedKeywords : ["需求分析", "项目推进"],
+    missingKeywords: missingKeywords.length ? missingKeywords : ["量化成果", "JD 关键词前置"],
+    lowRelevanceKeywords,
+    issues: buildDeterministicIssues({
+      currentScore,
+      missingKeywords,
+      matchedKeywords,
+      lowRelevanceKeywords,
+      dimensions,
+    }),
+    tasks: buildDeterministicTasks(missingKeywords, dimensions),
+    questions: buildDeterministicQuestions(missingKeywords, evaluatedTerms),
   };
 }
 
-function buildFallbackOptimizedResume({
-  resumeText,
-  targetRole,
-  targetCompany,
-  answers,
-  analysis,
+function evaluateJdTerms(jdText: string, resumeText: string, targetRole: string) {
+  const jd = normalizeForMatching(`${targetRole}\n${jdText}`);
+  const resume = normalizeForMatching(resumeText);
+  const selected = termDefinitions
+    .filter((term) => term.patterns.some((pattern) => pattern.test(jd)))
+    .map((term) => ({
+      ...term,
+      matched: term.patterns.some((pattern) => pattern.test(resume)),
+    }));
+  const genericTerms = extractGenericJdTerms(jdText)
+    .filter((label) => !selected.some((term) => term.label === label))
+    .slice(0, 10)
+    .map((label) => ({
+      label,
+      category: "responsibility" as const,
+      weight: 1.2,
+      patterns: [new RegExp(escapeRegExp(label), "i")],
+      matched: resume.includes(normalizeForMatching(label)),
+    }));
+  const terms = [...selected, ...genericTerms];
+
+  if (terms.length) return terms;
+
+  return termDefinitions.slice(14, 22).map((term) => ({
+    ...term,
+    matched: term.patterns.some((pattern) => pattern.test(resume)),
+  }));
+}
+
+function normalizeForMatching(value: string) {
+  return value.replace(/\s+/g, "").toLowerCase();
+}
+
+function extractGenericJdTerms(jdText: string) {
+  const normalized = jdText.replace(/[，。；、,.!?！？:：()（）【】\[\]0-9]/g, "\n");
+  const candidates = normalized
+    .split(/\n|\s+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length >= 2 && item.length <= 10 && genericTermTriggers.test(item));
+  return Array.from(new Set(candidates));
+}
+
+function weightedCoverage(terms: EvaluatedTerm[]) {
+  if (!terms.length) return 50;
+
+  const totalWeight = terms.reduce((sum, term) => sum + term.weight, 0);
+  const matchedWeight = terms.filter((term) => term.matched).reduce((sum, term) => sum + term.weight, 0);
+  return clampScore(Math.round((matchedWeight / totalWeight) * 100));
+}
+
+function scoreExperienceRelevance(terms: EvaluatedTerm[], resumeText: string, targetRole: string) {
+  const coverage = terms.length ? weightedCoverage(terms) : 55;
+  const projectScore = scoreProjectEvidence(resumeText);
+  const titleScore = scoreRoleSimilarity(resumeText, targetRole);
+
+  return clampScore(Math.round(coverage * 0.55 + projectScore * 0.3 + titleScore * 0.15));
+}
+
+function scoreRoleSimilarity(resumeText: string, targetRole: string) {
+  if (!targetRole.trim()) return /产品经理|解决方案|项目经理|运营/.test(resumeText) ? 72 : 58;
+
+  const targetTerms = targetRole
+    .replace(/[^\u4e00-\u9fa5a-zA-Z0-9]/g, " ")
+    .split(/\s+/)
+    .filter((term) => term.length >= 2);
+  if (!targetTerms.length) return 58;
+
+  const normalizedResume = normalizeForMatching(resumeText);
+  const matched = targetTerms.filter((term) => normalizedResume.includes(normalizeForMatching(term))).length;
+  return clampScore(Math.round((matched / targetTerms.length) * 100));
+}
+
+function scoreProjectEvidence(resumeText: string) {
+  let score = 38;
+  const projectHeadings = resumeText.match(/项目经历|【项目经历|项目\d|项目[一二三四五六七八九十]/g)?.length || 0;
+  const labeledBullets = resumeText.match(/项目背景|需求分析|产品规划|数据准备|方案设计|测试验证|测试迭代|工程护栏|落地成果|落地成效/g)?.length || 0;
+  const metricLines = resumeText.match(/%|提升|降低|减少|增长|缩短|节省|准确率|满意度|采纳率|成本/g)?.length || 0;
+  const collaborationLines = resumeText.match(/协同|跨部门|拉通|推动|组织|主导|负责/g)?.length || 0;
+
+  score += Math.min(18, projectHeadings * 6);
+  score += Math.min(20, labeledBullets * 3);
+  score += Math.min(14, metricLines * 2);
+  score += Math.min(10, collaborationLines);
+  return clampScore(score);
+}
+
+function scoreAtsFormat(resumeText: string) {
+  const sectionNames = ["个人简介", "个人总结", "核心技能", "专业技能", "工作经历", "项目经历", "教育经历"];
+  const sectionScore = sectionNames.filter((section) => resumeText.includes(section)).length * 8;
+  const lineCount = resumeText.split("\n").filter((line) => line.trim()).length;
+  const enoughTextScore = resumeText.length >= 800 ? 18 : resumeText.length >= 400 ? 12 : 6;
+  const lineScore = lineCount >= 20 ? 14 : lineCount >= 10 ? 9 : 5;
+  const bulletScore = /^[-•]|^\d+[.)、]/m.test(resumeText) ? 10 : 4;
+  const tablePenalty = /│|┌|┬|┐|└|┴|┘/.test(resumeText) ? 10 : 0;
+  const imagePenalty = resumeText.length < 120 ? 18 : 0;
+
+  return clampScore(32 + sectionScore + enoughTextScore + lineScore + bulletScore - tablePenalty - imagePenalty);
+}
+
+function scoreHardRequirements(resumeText: string, jdText: string, targetRole: string) {
+  let score = 70;
+  const requiredYears = extractRequiredYears(jdText);
+  const resumeYears = extractResumeYears(resumeText);
+
+  if (requiredYears > 0) {
+    if (resumeYears >= requiredYears) score += 15;
+    else if (resumeYears > 0 && resumeYears >= requiredYears - 1) score += 5;
+    else score -= 18;
+  }
+
+  if (/本科|硕士|研究生|211|985|双一流/.test(jdText)) {
+    score += /本科|硕士|研究生|211|985|双一流|学士|硕士/.test(resumeText) ? 8 : -10;
+  }
+
+  if (/产品经理|AI产品|AI\s*产品|解决方案/.test(`${targetRole}\n${jdText}`)) {
+    score += /产品经理|产品负责人|解决方案|项目经理/.test(resumeText) ? 7 : -8;
+  }
+
+  return clampScore(score);
+}
+
+function extractRequiredYears(jdText: string) {
+  const yearMatches = Array.from(jdText.matchAll(/(\d+)\s*年(?:以上)?(?:产品|工作|相关|项目|经验)/g));
+  if (!yearMatches.length) return 0;
+  return Math.max(...yearMatches.map((match) => Number(match[1])).filter(Number.isFinite));
+}
+
+function extractResumeYears(resumeText: string) {
+  const directYears = Array.from(resumeText.matchAll(/(\d+)\s*年(?:以上)?(?:产品|工作|相关|项目|经验)/g))
+    .map((match) => Number(match[1]))
+    .filter(Number.isFinite);
+  if (directYears.length) return Math.max(...directYears);
+
+  const yearRanges = Array.from(resumeText.matchAll(/(20\d{2})[.\-/年]\d{0,2}[^0-9]{0,8}(?:至今|现在|20\d{2})/g)).length;
+  return yearRanges ? Math.min(8, yearRanges * 2) : 0;
+}
+
+function findLowRelevanceKeywords(resumeText: string, jdText: string) {
+  const possible = ["内容运营", "活动执行", "纯销售", "行政事务", "平面设计", "传统建筑设计", "课程运营", "客服执行", "市场投放"];
+  const normalizedJd = normalizeForMatching(jdText);
+  const list = possible.filter((keyword) => resumeText.includes(keyword) && !normalizedJd.includes(normalizeForMatching(keyword)));
+  return list.length ? list.slice(0, 5) : ["泛化职责", "未量化表达"];
+}
+
+function getScoreLabel(score: number) {
+  if (score >= 85) return "高度匹配";
+  if (score >= 75) return "较匹配";
+  if (score >= 65) return "中等匹配";
+  if (score >= 50) return "匹配较弱";
+  return "低匹配";
+}
+
+function getRecommendation(score: number, missingKeywords: string[]) {
+  const missingText = missingKeywords.slice(0, 2).join("、");
+  if (score >= 85) return "可以较有信心投递，建议优化关键词顺序和项目表达后提交";
+  if (score >= 75) return "建议生成优化版后投递，重点补强项目证据和 JD 关键词";
+  if (score >= 65) return `建议先补齐${missingText || "关键证据"}，再使用优化版投递`;
+  if (score >= 50) return `建议作为转型尝试版处理，最需要补充${missingText || "岗位核心能力"}的真实证据`;
+  return `当前不建议直接投递，最不匹配的是${missingText || "岗位核心能力"}，需要先补充真实项目或作品集`;
+}
+
+function buildDeterministicIssues({
+  currentScore,
+  missingKeywords,
+  matchedKeywords,
+  lowRelevanceKeywords,
+  dimensions,
 }: {
-  resumeText: string;
-  targetRole: string;
-  targetCompany: string;
-  answers: Record<string, string>;
-  analysis: Analysis;
+  currentScore: number;
+  missingKeywords: string[];
+  matchedKeywords: string[];
+  lowRelevanceKeywords: string[];
+  dimensions: Dimension[];
 }) {
-  const role = targetRole || "AI 产品经理";
-  const companyLine = targetCompany ? `目标公司：${targetCompany}` : "";
-  const responsibility = answers.role || "负责模块";
-  const transitionNote = analysis.isTransition ? "\n版本标记：转型尝试版。当前简历仍存在关键经历缺口，建议补充真实项目或作品集后再重点投递。\n" : "";
-  const normalizedResume = resumeText.replace(/\r/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
-  const sections = [`求职方向：${role}`, companyLine, transitionNote.trim(), "优化版简历正文", normalizedResume].filter(Boolean);
-  const suggestions = [
-    "本版本为保守优化版：在模型不可用时，系统不会重写或新增未经确认的经历。",
-    `责任强度按“${responsibility}”处理；如不准确，请返回追问区修改。`,
-    "如确有 SQL、BI、大模型、Agent、RAG 或具体量化结果，请在追问中补充真实场景后再生成最终投递版。",
+  const weakestDimension = [...dimensions].sort((a, b) => a.value - b.value)[0];
+  const mainMissing = missingKeywords.slice(0, 3).join("、") || "岗位核心关键词";
+  const mainMatched = matchedKeywords.slice(0, 3).join("、") || "已有项目经验";
+  const issues: Issue[] = [
+    {
+      title: currentScore < 65 ? "整体匹配度偏低" : `${weakestDimension.label}偏弱`,
+      text: currentScore < 65
+        ? `当前最关键的缺口是${mainMissing}，如果没有真实经历补充，只能生成转型尝试版，不建议把缺失能力写成事实。`
+        : `当前主要短板集中在${weakestDimension.label}，建议围绕${mainMissing}补充真实项目证据。`,
+      severity: "high",
+    },
+    {
+      title: "已有经历需要更贴近 JD",
+      text: `简历中已有${mainMatched}等可用证据，但需要前置到个人简介、核心技能和项目经历中，减少泛化表达。`,
+      severity: "medium",
+    },
   ];
 
-  return `${sections.join("\n")}\n\n补充建议\n- ${suggestions.join("\n- ")}`;
+  if (lowRelevanceKeywords.length) {
+    issues.push({
+      title: "低相关内容需要降权",
+      text: `${lowRelevanceKeywords.slice(0, 3).join("、")}与目标 JD 的直接关联较弱，建议压缩篇幅，把空间留给岗位高频要求。`,
+      severity: "medium",
+    });
+  }
+
+  return issues.slice(0, 4);
+}
+
+function buildDeterministicTasks(missingKeywords: string[], dimensions: Dimension[]) {
+  const weakestDimension = [...dimensions].sort((a, b) => a.value - b.value)[0];
+  const missingText = missingKeywords.slice(0, 3).join("、") || "岗位核心关键词";
+
+  return [
+    {
+      priority: "high" as const,
+      title: "补齐关键证据",
+      text: `优先确认是否有${missingText}相关真实经历；没有确认前，只能作为风险提示或追问，不能写入最终简历。`,
+    },
+    {
+      priority: "medium" as const,
+      title: "重写项目经历",
+      text: "每个项目改成项目名称、角色、时间段加 4-6 条结构化小点，突出项目背景、方案设计、测试迭代和落地成果。",
+    },
+    {
+      priority: "quick" as const,
+      title: `优化${weakestDimension.label}`,
+      text: "把 JD 高频词自然放进个人简介、核心技能和项目首句，提高 ATS 可识别度，但不新增未经确认的事实。",
+    },
+  ];
+}
+
+function buildDeterministicQuestions(missingKeywords: string[], evaluatedTerms: EvaluatedTerm[]) {
+  const questions: Question[] = [];
+  const missingSet = new Set(missingKeywords);
+
+  if (["AI 产品", "大模型", "智能体/Agent", "RAG", "Prompt"].some((keyword) => missingSet.has(keyword))) {
+    questions.push(defaultQuestions[0]);
+  }
+  if (["SQL", "BI 工具", "数据分析", "数据看板"].some((keyword) => missingSet.has(keyword))) {
+    questions.push(defaultQuestions[1]);
+  }
+  if (["B 端/SaaS", "企业后台", "工作流"].some((keyword) => missingSet.has(keyword))) {
+    questions.push(defaultQuestions[2]);
+  }
+  if (missingSet.has("量化成果") || evaluatedTerms.some((term) => term.label === "量化成果" && !term.matched)) {
+    questions.push(defaultQuestions[3]);
+  }
+  questions.push(defaultQuestions[4]);
+
+  return dedupeQuestions(questions.length >= 3 ? questions : defaultQuestions).slice(0, 5);
+}
+
+function dedupeQuestions(questions: Question[]) {
+  const seen = new Set<string>();
+  return questions.filter((question) => {
+    if (seen.has(question.id)) return false;
+    seen.add(question.id);
+    return true;
+  });
+}
+
+function clampScore(input: number) {
+  return Math.max(0, Math.min(100, Math.round(input)));
 }
